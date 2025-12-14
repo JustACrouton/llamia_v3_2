@@ -1,0 +1,11 @@
+[project]
+name = "llamia-v3-2"
+version = "0.1.0"
+description = "Llamia v3.2 multi-agent skeleton"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.51.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]

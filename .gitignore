@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local runtime artifacts
+workspace/*
+!workspace/.gitkeep
+*.log
+
+# Local configs / secrets (adjust names to your project)
+.env
+.env.*
+searxng_settings.yml
+settings.yml
+config.yml
+config.yaml
+*.pem
+*.key
+
+# If you store model caches locally
+.cache/
