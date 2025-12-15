@@ -1,10 +1,20 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 from typing import Any
 from collections import Counter
+from dataclasses import asdict, is_dataclass
 
 import sys
 import signal
+import select
+import json
+import time
+import logging
+import re
+import subprocess
+from pathlib import Path
+from datetime import datetime
 
 from llamia_v3_2.state import (
     LlamiaState,
@@ -20,7 +30,14 @@ from llamia_v3_2.graph import build_llamia_graph
 # Invoke safety limits
 # -----------------------------
 INVOKE_RECURSION_LIMIT = 40        # hard cap on langgraph recursion
-INVOKE_TIMEOUT_S = 45              # wall-clock cap per turn (Linux only)
+INVOKE_TIMEOUT_S = 45              # wall-clock cap per turn (Linux/macOS only)
+
+# How many times main.py will auto-retry to satisfy the task contract
+MAX_CONTRACT_RETRIES = 2
+
+# Repo snapshot injected into task prompts to reduce hallucinations
+INJECT_REPO_SNAPSHOT = True
+REPO_SNAPSHOT_MAX_FILES = 250
 
 
 class InvokeTimeout(Exception):
@@ -32,7 +49,7 @@ def _alarm_handler(signum, frame):
 
 
 def _set_alarm(seconds: int):
-    # SIGALRM works on Linux/macOS. If unavailable, we just skip timeout.
+    # SIGALRM works on Linux/macOS. If unavailable (e.g., Windows), we skip.
     if hasattr(signal, "SIGALRM"):
         signal.signal(signal.SIGALRM, _alarm_handler)
         signal.alarm(max(1, int(seconds)))
@@ -43,6 +60,197 @@ def _clear_alarm():
         signal.alarm(0)
 
 
+# -----------------------------
+# Logging
+# -----------------------------
+def _safe_to_json(obj: Any) -> Any:
+    """Convert objects to something JSON serializable."""
+    try:
+        if is_dataclass(obj):
+            return asdict(obj)
+    except Exception:
+        pass
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _safe_to_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_to_json(x) for x in obj]
+    return str(obj)
+
+
+def _setup_run_logger() -> tuple[logging.Logger, Path, Path]:
+    log_dir = Path("workspace") / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    text_path = log_dir / f"run_{stamp}.log"
+    jsonl_path = log_dir / f"run_{stamp}.jsonl"
+
+    logger = logging.getLogger("llamia")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    fh = logging.FileHandler(text_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(fh)
+
+    # IMPORTANT: do NOT log to stdout or it will corrupt the "you>" prompt.
+    # If you want console logs, send to stderr and keep it WARNING+.
+    ch = logging.StreamHandler(sys.stderr)
+    ch.setLevel(logging.WARNING)
+    ch.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    logger.addHandler(ch)
+
+    # Print log paths manually (stdout) once at startup
+    print(f"[log] text:  {text_path}")
+    print(f"[log] jsonl: {jsonl_path}")
+
+    return logger, text_path, jsonl_path
+
+
+def _append_jsonl(jsonl_path: Path, record: dict[str, Any]) -> None:
+    record = _safe_to_json(record)
+    with jsonl_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# -----------------------------
+# Git / repo helpers
+# -----------------------------
+def _run_git(args: list[str]) -> tuple[int, str, str]:
+    try:
+        p = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return 127, "", "git not found"
+
+
+def _git_ls_files() -> list[str]:
+    rc, out, _ = _run_git(["ls-files"])
+    if rc != 0:
+        return []
+    files = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    return files
+
+
+def _git_status_porcelain() -> list[str]:
+    rc, out, _ = _run_git(["status", "--porcelain"])
+    if rc != 0:
+        return []
+    return [ln.rstrip("\n") for ln in out.splitlines() if ln.strip()]
+
+
+def _repo_snapshot_text(max_files: int = REPO_SNAPSHOT_MAX_FILES) -> str:
+    files = _git_ls_files()
+    if not files:
+        # fallback: non-git directory
+        root = Path(".")
+        files = []
+        for p in root.rglob("*"):
+            if p.is_file():
+                # skip venv + logs + big caches
+                s = str(p)
+                if s.startswith(".venv/") or s.startswith("workspace/logs/") or "/__pycache__/" in s:
+                    continue
+                files.append(s)
+                if len(files) >= max_files:
+                    break
+
+    files = sorted(files)[:max_files]
+    return "Repo files (truncated):\n" + "\n".join(f"- {f}" for f in files)
+
+
+# -----------------------------
+# Task contract checks
+# -----------------------------
+_WS_PATH_RE = re.compile(r"(workspace/[A-Za-z0-9._\-\/]+)")
+
+def _extract_required_workspace_paths(user_input: str) -> list[str]:
+    # Any explicit "workspace/..." is treated as required output
+    found = _WS_PATH_RE.findall(user_input)
+    # normalize + dedup while preserving order
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in found:
+        p = p.strip().rstrip(".")
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out
+
+
+def _prompt_requests_patch(user_input: str) -> bool:
+    s = user_input.lower()
+    return ("improvements.patch" in s) or ("unified diff" in s) or ("git style" in s) or ("create workspace/" in s and ".patch" in s)
+
+
+def _patch_touches_tracked_files(patch_text: str, tracked_files: set[str]) -> bool:
+    # Look for: diff --git a/<path> b/<path>
+    for line in patch_text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                a_path = parts[2].removeprefix("a/").strip()
+                b_path = parts[3].removeprefix("b/").strip()
+                if a_path in tracked_files or b_path in tracked_files:
+                    return True
+    return False
+
+
+def _validate_task_contract(user_input: str) -> list[str]:
+    failures: list[str] = []
+
+    # 1) Required workspace artifacts
+    required = _extract_required_workspace_paths(user_input)
+    for rel in required:
+        p = Path(rel)
+        if not p.exists():
+            failures.append(f"Missing required file: {rel}")
+
+    # 2) "Do not modify tracked files" enforcement
+    if "do not modify" in user_input.lower() and ("tracked file" in user_input.lower() or "repo code" in user_input.lower()):
+        status = _git_status_porcelain()
+        # Any change outside workspace/ is a violation
+        bad = []
+        for ln in status:
+            # porcelain format: XY <path> or similar
+            path = ln[3:] if len(ln) > 3 else ln
+            path = path.strip()
+            if path and not path.startswith("workspace/"):
+                bad.append(ln)
+        if bad:
+            failures.append("Modified tracked files unexpectedly:\n" + "\n".join(bad))
+
+    # 3) Patch sanity (if prompt asked for a patch)
+    if _prompt_requests_patch(user_input):
+        # Find the most likely patch file requested
+        patch_paths = [p for p in required if p.lower().endswith(".patch")]
+        if patch_paths:
+            patch_path = Path(patch_paths[0])
+            if patch_path.exists():
+                txt = patch_path.read_text(encoding="utf-8", errors="replace")
+                tracked = set(_git_ls_files())
+                if tracked and not _patch_touches_tracked_files(txt, tracked):
+                    failures.append(
+                        f"Patch does not touch any existing git-tracked files (likely hallucinated / irrelevant). "
+                        f"Regenerate {patch_path.as_posix()} to modify real files from git ls-files."
+                    )
+            else:
+                failures.append(f"Patch file not created: {patch_paths[0]}")
+
+    return failures
+
+
+# -----------------------------
+# State coercion helpers
+# -----------------------------
 def _make_exec_results(raw_list: Any) -> list[ExecResult]:
     results: list[ExecResult] = []
     if not isinstance(raw_list, list):
@@ -63,10 +271,6 @@ def _make_exec_results(raw_list: Any) -> list[ExecResult]:
 
 
 def _coerce_to_state(raw: Any) -> LlamiaState:
-    """
-    LangGraph currently returns a plain dict even if we start with a dataclass.
-    This helper converts the returned object back into LlamiaState.
-    """
     if isinstance(raw, LlamiaState):
         return raw
 
@@ -129,7 +333,6 @@ def _coerce_to_state(raw: Any) -> LlamiaState:
 
         return_after_web = str(raw.get("return_after_web", "planner") or "planner").strip() or "planner"
 
-        # NEW: carry turn ids if present
         turn_id = int(raw.get("turn_id", 0) or 0)
         responded_turn_id = int(raw.get("responded_turn_id", -1) or -1)
 
@@ -156,7 +359,8 @@ def _coerce_to_state(raw: Any) -> LlamiaState:
             web_results=raw.get("web_results"),
             return_after_web=return_after_web,
 
-            # NEW
+            web_search_count=int(raw.get("web_search_count", 0) or 0),
+
             turn_id=turn_id,
             responded_turn_id=responded_turn_id,
         )
@@ -166,9 +370,47 @@ def _coerce_to_state(raw: Any) -> LlamiaState:
     return state
 
 
+# -----------------------------
+# Paste-aware input
+# -----------------------------
+def _read_user_input_block() -> str | None:
+    """Read one user message; drain any immediately-buffered paste lines."""
+    try:
+        first = input("you> ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if not first.strip():
+        return ""
+
+    lines = [first]
+
+    # Drain already-buffered stdin (common when pasting multi-line tasks)
+    while True:
+        r, _, _ = select.select([sys.stdin], [], [], 0.02)
+        if not r:
+            break
+        nxt = sys.stdin.readline()
+        if not nxt:
+            break
+        lines.append(nxt.rstrip("\n"))
+
+    return "\n".join(lines).rstrip()
+
+
+# -----------------------------
+# REPL
+# -----------------------------
 def run_repl():
+    logger, _text_path, jsonl_path = _setup_run_logger()
+
     state = LlamiaState()
     app = build_llamia_graph()
+
+    if not hasattr(state, "turn_id"):
+        state.turn_id = 0
+    if not hasattr(state, "responded_turn_id"):
+        state.responded_turn_id = -1
 
     print("Llamia v3.2 (LangGraph + planner + coder + executor + chat). Type 'exit' to quit.\n")
     print("Tips:")
@@ -176,58 +418,183 @@ def run_repl():
     print("  - 'task: build me X': task mode => planner, coder (writes into workspace/), executor (runs safe commands), then chat.\n")
 
     while True:
-        try:
-            user_input = input("you> ")
-        except (EOFError, KeyboardInterrupt):
+        user_input = _read_user_input_block()
+        if user_input is None:
             print("\nBye.")
+            logger.info("[repl] exit at prompt")
+            _append_jsonl(jsonl_path, {"event": "repl_exit", "reason": "prompt_exit", "ts": time.time()})
             break
+
+        if not user_input.strip():
+            continue
 
         if user_input.strip().lower() in {"exit", "quit"}:
             print("Bye.")
+            logger.info("[repl] user requested exit")
+            _append_jsonl(jsonl_path, {"event": "repl_exit", "reason": "user_exit", "ts": time.time()})
             break
 
-        # NEW: per-turn id increments (used by chat guard)
+        # Turn bookkeeping
         state.turn_id += 1
         state.responded_turn_id = -1
 
-        state.add_message("user", user_input, node=None)
+        before_applied_len = len(getattr(state, "applied_patches", []))
+        before_exec_len = len(getattr(state, "exec_results", []))
+        before_msg_len = len(getattr(state, "messages", []))
+        before_mode = getattr(state, "mode", None)
 
-        before_applied_len = len(state.applied_patches)
-        before_exec_len = len(state.exec_results)
+        _append_jsonl(jsonl_path, {
+            "event": "turn_start",
+            "turn_id": state.turn_id,
+            "mode_before": before_mode,
+            "user_input": user_input,
+            "ts": time.time(),
+        })
 
-        try:
-            _set_alarm(INVOKE_TIMEOUT_S)
-            raw_result = app.invoke(
-                state,
-                config={"recursion_limit": INVOKE_RECURSION_LIMIT},
-            )
-        except InvokeTimeout as e:
-            # clean stop: no stack trace, don't burn GPU forever
-            state.add_message("system", f"[main] {e}", node="main")
-            print(f"llamia> [timed out] {e}\n")
+        # Inject repo snapshot for tasks (helps reduce hallucinations)
+        if INJECT_REPO_SNAPSHOT and user_input.lstrip().lower().startswith("task:"):
+            snap = _repo_snapshot_text()
+            state.add_message("system", f"[repo_snapshot]\n{snap}", node="main")
+
+        state.add_message("user", user_input, node="repl")
+
+        # Controlled contract retries
+        attempt = 0
+        raw_result: Any = None
+        while True:
+            attempt += 1
+            t0 = time.time()
+            try:
+                _set_alarm(INVOKE_TIMEOUT_S)
+                raw_result = app.invoke(
+                    state,
+                    config={"recursion_limit": INVOKE_RECURSION_LIMIT},
+                )
+            except InvokeTimeout as e:
+                dt = time.time() - t0
+                state.add_message("system", f"[main] {e}", node="main")
+                print(f"llamia> [timed out] {e}\n")
+                logger.warning(f"[turn {state.turn_id}] TIMEOUT after {dt:.2f}s: {e}")
+                _append_jsonl(jsonl_path, {
+                    "event": "invoke_timeout",
+                    "turn_id": state.turn_id,
+                    "attempt": attempt,
+                    "elapsed_s": dt,
+                    "error": str(e),
+                    "ts": time.time(),
+                })
+                raw_result = None
+                break
+            except KeyboardInterrupt:
+                dt = time.time() - t0
+                print("\nllamia> [interrupted] (Ctrl+C). You can type 'exit' to quit.\n")
+                logger.warning(f"[turn {state.turn_id}] INTERRUPTED after {dt:.2f}s")
+                _append_jsonl(jsonl_path, {
+                    "event": "invoke_interrupt",
+                    "turn_id": state.turn_id,
+                    "attempt": attempt,
+                    "elapsed_s": dt,
+                    "ts": time.time(),
+                })
+                raw_result = None
+                break
+            finally:
+                _clear_alarm()
+
+            dt = time.time() - t0
+            state = _coerce_to_state(raw_result)
+
+            _append_jsonl(jsonl_path, {
+                "event": "invoke_done",
+                "turn_id": state.turn_id,
+                "attempt": attempt,
+                "elapsed_s": dt,
+                "mode_after": getattr(state, "mode", None),
+                "ts": time.time(),
+            })
+
+            # If this was a task, enforce the contract
+            if user_input.lstrip().lower().startswith("task:"):
+                failures = _validate_task_contract(user_input)
+                if failures:
+                    _append_jsonl(jsonl_path, {
+                        "event": "contract_fail",
+                        "turn_id": state.turn_id,
+                        "attempt": attempt,
+                        "failures": failures,
+                        "ts": time.time(),
+                    })
+                    # Print one clear line so you see it's not "SUCCESS"
+                    print("llamia> [contract violation] The task output did not satisfy requirements:")
+                    for f in failures:
+                        print(f"  - {f}")
+                    print("")
+
+                    if attempt >= MAX_CONTRACT_RETRIES:
+                        # Stop retrying; user can inspect logs/files
+                        state.add_message("system", "[main] Contract failed after max retries.", node="main")
+                        break
+
+                    # Add a hard corrective instruction and retry once more
+                    fix_msg = (
+                        "[main] CONTRACT VIOLATION.\n"
+                        "You MUST fix the failures below, using ONLY workspace/ outputs.\n"
+                        "Do NOT claim success until all are satisfied.\n\n"
+                        "Failures:\n- " + "\n- ".join(failures) + "\n\n"
+                        "Now regenerate the required artifacts, ensuring patch modifies REAL git-tracked files.\n"
+                    )
+                    state.add_message("system", fix_msg, node="main")
+                    continue
+
+            # Contract OK (or not a task)
+            break
+
+        if raw_result is None:
+            # timeout/interrupt path
             continue
-        except KeyboardInterrupt:
-            # clean stop for runaway model calls
-            print("\nllamia> [interrupted] (Ctrl+C). You can type 'exit' to quit.\n")
-            # important: don't keep partially mutated state; just continue loop
-            continue
-        finally:
-            _clear_alarm()
 
-        state = _coerce_to_state(raw_result)
+        after_mode = getattr(state, "mode", None)
+        new_applied = state.applied_patches[before_applied_len:] if getattr(state, "applied_patches", None) else []
+        new_exec = state.exec_results[before_exec_len:] if getattr(state, "exec_results", None) else []
+        new_msgs = state.messages[before_msg_len:] if getattr(state, "messages", None) else []
 
-        # Print *new* assistant message (last one)
+        # Print last assistant message if present
         if not state.messages or state.messages[-1].get("role") != "assistant":
             print("llamia> [no assistant reply produced]\n")
+            _append_jsonl(jsonl_path, {
+                "event": "turn_end",
+                "turn_id": state.turn_id,
+                "mode_after": after_mode,
+                "assistant": None,
+                "new_messages": new_msgs,
+                "new_applied_patches": new_applied,
+                "new_exec_results": new_exec,
+                "ts": time.time(),
+            })
             continue
 
         last = state.messages[-1]
-        print(f"llamia> {last.get('content','')}\n")
+        assistant_text = last.get("content", "")
+        print(f"llamia> {assistant_text}\n")
         sys.stdout.flush()
 
-        new_applied = state.applied_patches[before_applied_len:]
-        new_exec = state.exec_results[before_exec_len:]
+        _append_jsonl(jsonl_path, {
+            "event": "turn_end",
+            "turn_id": state.turn_id,
+            "mode_before": before_mode,
+            "mode_after": after_mode,
+            "assistant": assistant_text,
+            "plan": getattr(state, "plan", []),
+            "exec_request": getattr(state, "exec_request", None),
+            "new_messages": new_msgs,
+            "new_applied_patches": new_applied,
+            "new_exec_results": new_exec,
+            "web_results": getattr(state, "web_results", None),
+            "trace": getattr(state, "trace", None),
+            "ts": time.time(),
+        })
 
+        # Task-mode summary prints
         if state.mode == "task":
             if state.plan:
                 print("  [plan]")
@@ -263,4 +630,3 @@ def run_repl():
 
 if __name__ == "__main__":
     run_repl()
-

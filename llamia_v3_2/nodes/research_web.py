@@ -50,7 +50,7 @@ def research_web_node(state: LlamiaState) -> LlamiaState:
     except Exception as e:
         state.add_message("system", f"[web_search] ERROR: {e!r}", node=NODE_NAME)
         state.log(f"[{NODE_NAME}] error={e!r}")
-        # clear trigger so we don’t loop forever
+        # clear trigger so we don't loop forever
         state.research_query = None
         state.next_agent = "planner" if state.mode == "task" else "chat"
         return state
@@ -72,8 +72,8 @@ def research_web_node(state: LlamiaState) -> LlamiaState:
     state.research_query = None
 
     # ? Route back:
-    # - if we’re in a task, planner consumes research_notes and continues
-    # - if we’re in chat (explicit web:), go to chat
+    # - if we're in a task, planner consumes research_notes and continues
+    # - if we're in chat (explicit web:), go to chat
     state.next_agent = "planner" if state.mode == "task" else "chat"
 
     state.log(f"[{NODE_NAME}] got_results={len(results)} next_agent={state.next_agent}")

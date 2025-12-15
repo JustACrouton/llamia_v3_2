@@ -85,6 +85,12 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         state.mode = "chat"
         state.goal = None
         state.research_query = None
+        state.research_notes = None
+        state.web_results = None
+        state.web_queue = []
+        state.web_search_count = 0
+        state.loop_count = 0
+        state.fix_instructions = None
         state.next_agent = "chat"
         state.log(f"[{NODE_NAME}] no messages -> chat")
         return state
@@ -104,6 +110,11 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         state.mode = "chat"          # prevent stale task mode
         state.goal = None            # prevent stale goals
         state.research_query = q
+        state.research_notes = None
+        state.web_results = None
+        state.web_queue = []
+        state.web_search_count = 0
+        state.fix_instructions = None
         state.next_agent = "research_web"
         state.log(f"[{NODE_NAME}] WEB: next_agent=research_web query={q!r}")
         return state
@@ -116,6 +127,12 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         goal = _extract_task_goal(text)
         state.mode = "task"
         state.goal = goal
+        state.research_notes = None
+        state.web_results = None
+        state.web_queue = []
+        state.web_search_count = 0
+        state.loop_count = 0
+        state.fix_instructions = None
         state.next_agent = "planner"
         state.log(f"[{NODE_NAME}] TASK: mode=task goal={goal!r}")
         return state
@@ -124,6 +141,12 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     if _looks_like_task(text):
         state.mode = "task"
         state.goal = text
+        state.research_notes = None
+        state.web_results = None
+        state.web_queue = []
+        state.web_search_count = 0
+        state.loop_count = 0
+        state.fix_instructions = None
         state.next_agent = "planner"
         state.log(f"[{NODE_NAME}] TASK(heur): mode=task goal={text!r}")
         return state
@@ -131,6 +154,12 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     # 3) Default chat
     state.mode = "chat"
     state.goal = None               # set to None unless you want sticky tasks
+    state.research_notes = None
+    state.web_results = None
+    state.web_queue = []
+    state.web_search_count = 0
+    state.loop_count = 0
+    state.fix_instructions = None
     state.next_agent = "chat"
     state.log(f"[{NODE_NAME}] CHAT: next_agent=chat")
     return state

@@ -40,3 +40,6 @@ config.yaml
 
 # If you store model caches locally
 .cache/
+
+# Chroma / RAG index (local)
+.llamia_chroma/

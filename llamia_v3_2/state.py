@@ -72,6 +72,10 @@ class LlamiaState:
     web_results: str | None = None                       # last web results summary
     return_after_web: str = "planner"                    # where to go when web finishes
 
+
+    # Critic web-search throttle (resets per task)
+    web_search_count: int = 0
+
     # Execution request (suggested commands)
     exec_request: ExecRequest | None = None
 

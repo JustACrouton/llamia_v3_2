@@ -215,7 +215,16 @@ Plan:
         exec_req = ExecRequest(workdir="workspace", commands=["python generated_script.py"])
 
     if patches:
-        written_files = apply_patches(patches)
+        try:
+            written_files = apply_patches(patches)
+        except Exception as e:
+            # Most likely a path safety issue (eg. attempted write outside workspace)
+            state.pending_patches = []
+            state.exec_request = None
+            state.add_message("system", f"[coder] ERROR applying patches: {e!r}", node=NODE_NAME)
+            state.log(f"[{NODE_NAME}] ERROR applying patches: {e!r}")
+            return state
+
         state.pending_patches = []
         state.applied_patches.extend(patches)
 

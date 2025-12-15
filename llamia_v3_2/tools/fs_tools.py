@@ -24,15 +24,22 @@ def _normalize_path(file_path: str) -> Path:
     Interpret file_path as relative to the workspace.
     We allow paths like "hello.py" or "subdir/script.py".
 
+    Security:
+    - Prevent path traversal (..), absolute paths, and writing outside workspace/.
+
     If the model includes a leading 'workspace/' in the path, strip it.
     """
-    ws = ensure_workspace()
+    ws = ensure_workspace().resolve()
     cleaned = file_path.lstrip("/")
 
     if cleaned.startswith("workspace/"):
         cleaned = cleaned[len("workspace/") :]
 
-    return ws / cleaned
+    # Resolve the final path and ensure it stays within workspace
+    target = (ws / cleaned).resolve()
+    if ws in target.parents:
+        return target
+    raise ValueError(f"Refusing to write outside workspace: {file_path!r}")
 
 
 def apply_patch(patch: CodePatch) -> Path:
