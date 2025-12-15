@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List
 
 from ..state import LlamiaState, CodePatch, ExecRequest, PlanStep
@@ -9,6 +10,34 @@ from ..llm_client import chat_completion
 from ..tools.fs_tools import apply_patches
 
 NODE_NAME = "coder"
+
+
+def _is_patch_task(goal: str) -> bool:
+    g = (goal or "").lower()
+    return any(k in g for k in ["unified diff", "diff --git", "git style", ".patch", "improvements.patch"])
+
+
+def _git_ls_files_filtered(limit: int = 200) -> list[str]:
+    """Return git-tracked file paths (filtered to keep prompts small + relevant)."""
+    try:
+        import subprocess
+        out = subprocess.check_output(["git", "ls-files"], text=True, cwd=str(Path(__file__).resolve().parents[2]))
+    except Exception:
+        return []
+    files = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    # Drop workspace + big/binary artifacts
+    skip_prefixes = ("workspace/", ".llamia_chroma/", ".venv/")
+    skip_exts = (".bin", ".sqlite3", ".db")
+    filtered: list[str] = []
+    for f in files:
+        if any(f.startswith(p) for p in skip_prefixes):
+            continue
+        if any(f.endswith(ext) for ext in skip_exts):
+            continue
+        filtered.append(f)
+        if len(filtered) >= limit:
+            break
+    return filtered
 
 
 CODER_SYSTEM_PROMPT = """You are a coding agent for an autonomous developer assistant.
@@ -67,6 +96,42 @@ You MUST respond with STRICT JSON ONLY in this format:
   }
 }
 """
+
+CODER_SYSTEM_PROMPT_PATCH = """You are a coding agent for an autonomous developer assistant.
+
+You are in PATCH-PROPOSAL mode.
+
+Your job:
+- Propose concrete improvements to the EXISTING repo code as a unified diff.
+- You MUST write the requested *.patch and *.md artifacts into workspace/.
+
+Rules:
+- You MUST NOT modify tracked repo files directly.
+- The .patch content MUST be a unified diff (git style) that targets ONLY existing git-tracked files.
+- Do NOT invent new files (e.g., hello.py) unless the goal explicitly requests a new tracked file.
+- When writing workspace files, use relative paths WITHOUT the \"workspace/\" prefix.
+
+Patch requirements:
+- The patch must include at least one \"diff --git a/<path> b/<path>\" for a real tracked file.
+- Prefer small, safe, reviewable changes (logging, contract checks, loop guards, better prompts).
+
+Output STRICT JSON ONLY in this format:
+{
+  \"patches\": [
+    { \"file_path\": \"IMPROVEMENTS.patch\", \"apply_mode\": \"overwrite\", \"content\": \"<unified diff here>\" },
+    { \"file_path\": \"IMPROVEMENTS.md\", \"apply_mode\": \"overwrite\", \"content\": \"<explanation + test steps>\" }
+  ],
+  \"exec\": {
+    \"workdir\": \".\",
+    \"commands\": [
+      \"git status --porcelain\",
+      \"git apply --check workspace/IMPROVEMENTS.patch\",
+      \"python -m compileall -q .\"
+    ]
+  }
+}
+"""
+
 
 
 def _filter_safe_commands(cmds: list[str]) -> list[str]:
@@ -138,10 +203,31 @@ Plan:
 {notes_block}
 """
 
+    # PATCH-PROPOSAL mode: provide tracked file list + switch prompts
+    is_patch_task = _is_patch_task(state.goal)
+    tracked = _git_ls_files_filtered(limit=200) if is_patch_task else []
+    if tracked:
+        user_prompt += "\nRepo tracked files you may reference in a unified diff (filtered):\n" + "\n".join(f"- {p}" for p in tracked) + "\n"
+
+    system_prompt = CODER_SYSTEM_PROMPT_PATCH if is_patch_task else CODER_SYSTEM_PROMPT
+
     messages = [
-        {"role": "system", "content": CODER_SYSTEM_PROMPT, "node": NODE_NAME},
+        {"role": "system", "content": system_prompt, "node": NODE_NAME},
         {"role": "user", "content": user_prompt, "node": NODE_NAME},
     ]
+
+    # Include a small tail of conversation context (repo snapshot, contract failures, etc.)
+    ctx_lines: list[str] = []
+    for m in (state.messages or [])[-8:]:
+        role = m.get("role") or "?"
+        node = m.get("node") or "?"
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        content = content if len(content) <= 3000 else content[:3000] + "\n...[truncated]"
+        ctx_lines.append(f"[{role}:{node}] {content}")
+    if ctx_lines:
+        messages.append({"role": "system", "content": "Recent context (tail):\n" + "\n\n".join(ctx_lines), "node": NODE_NAME})
 
     cfg = DEFAULT_CONFIG.model_for("coder")
     state.log(f"[{NODE_NAME}] using model={cfg.model} temp={cfg.temperature}")

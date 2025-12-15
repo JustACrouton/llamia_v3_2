@@ -34,6 +34,10 @@ def _needs_web_search(goal: str) -> bool:
     Keep it conservative to avoid pointless web hits.
     """
     t = (goal or "").lower().strip()
+    # Local repo-only tasks (patch/diff/test runs) should not trigger web search.
+    if any(k in t for k in ["unified diff", "diff --git", ".patch", "git style", "git apply", "git diff"]):
+        return False
+
     if not t:
         return False
 

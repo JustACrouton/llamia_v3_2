@@ -14,6 +14,7 @@ ALLOWED_BINARIES = {
     "pytest",
     "ruff",
     "mypy",
+    "git",
 }
 
 # Disallow shell metacharacters (no chaining / redirects).
@@ -37,6 +38,24 @@ def _is_safe_command(cmd: str) -> bool:
         return False
 
     exe = parts[0]
+
+    # Extra safety for git: allow only read-only-ish commands + apply --check
+    if exe == "git":
+        if len(parts) < 2:
+            return False
+        sub = parts[1]
+        allowed_sub = {"status", "diff", "ls-files", "apply"}
+        if sub not in allowed_sub:
+            return False
+        if sub == "apply":
+            # Only allow dry-run validation; never apply changes here.
+            if "--check" not in parts:
+                return False
+            # Disallow flags that can write reject files or bypass path safety.
+            if any(f in parts for f in ["--reject", "--unsafe-paths"]):
+                return False
+        return True
+
     return exe in ALLOWED_BINARIES
 
 

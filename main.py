@@ -147,6 +147,43 @@ def _git_status_porcelain() -> list[str]:
     return [ln.rstrip("\n") for ln in out.splitlines() if ln.strip()]
 
 
+
+def _porcelain_paths(lines: list[str]) -> set[str]:
+    paths: set[str] = set()
+    for ln in lines:
+        if len(ln) < 4:
+            continue
+        path = ln[3:].strip()
+        # handle renames: "R  old -> new"
+        if " -> " in path:
+            old, new = path.split(" -> ", 1)
+            paths.add(old.strip())
+            paths.add(new.strip())
+        else:
+            paths.add(path)
+    return paths
+
+
+def _dirty_outside_workspace() -> set[str]:
+    lines = _git_status_porcelain()
+    paths = _porcelain_paths(lines)
+    return {p for p in paths if p and not p.startswith("workspace/")}
+
+
+def _git_restore_paths(paths: set[str]) -> None:
+    if not paths:
+        return
+    plist = sorted(paths)
+
+    # Try modern restore first
+    rc, _, _ = _run_git(["restore", "--staged", "--worktree", "--", *plist])
+    if rc == 0:
+        return
+
+    # Fallback for older git
+    _run_git(["reset", "--", *plist])
+    _run_git(["checkout", "--", *plist])
+
 def _repo_snapshot_text(max_files: int = REPO_SNAPSHOT_MAX_FILES) -> str:
     files = _git_ls_files()
     if not files:
@@ -155,15 +192,40 @@ def _repo_snapshot_text(max_files: int = REPO_SNAPSHOT_MAX_FILES) -> str:
         files = []
         for p in root.rglob("*"):
             if p.is_file():
-                # skip venv + logs + big caches
                 s = str(p)
-                if s.startswith(".venv/") or s.startswith("workspace/logs/") or "/__pycache__/" in s:
-                    continue
                 files.append(s)
-                if len(files) >= max_files:
+                if len(files) >= max_files * 3:
+                    # collect a bit extra before filtering
                     break
 
-    files = sorted(files)[:max_files]
+    # Filter out noisy/binary/large artifacts so the model doesn't get distracted.
+    skip_prefixes = (
+        ".venv/",
+        "workspace/logs/",
+        "workspace/.venv/",
+        ".llamia_chroma/",
+    )
+    skip_exts = (
+        ".bin",
+        ".sqlite3",
+        ".db",
+        ".pkl",
+        ".pt",
+        ".onnx",
+    )
+
+    filtered: list[str] = []
+    for s in files:
+        s = str(s)
+        if any(s.startswith(p) for p in skip_prefixes):
+            continue
+        if "/__pycache__/" in s or s.endswith("/__pycache__"):
+            continue
+        if any(s.endswith(ext) for ext in skip_exts):
+            continue
+        filtered.append(s)
+
+    files = sorted(filtered)[:max_files]
     return "Repo files (truncated):\n" + "\n".join(f"- {f}" for f in files)
 
 
@@ -204,7 +266,7 @@ def _patch_touches_tracked_files(patch_text: str, tracked_files: set[str]) -> bo
     return False
 
 
-def _validate_task_contract(user_input: str) -> list[str]:
+def _validate_task_contract(user_input: str, baseline_dirty_outside_ws: set[str] | None = None) -> tuple[list[str], set[str]]:
     failures: list[str] = []
 
     # 1) Required workspace artifacts
@@ -214,21 +276,16 @@ def _validate_task_contract(user_input: str) -> list[str]:
         if not p.exists():
             failures.append(f"Missing required file: {rel}")
 
-    # 2) "Do not modify tracked files" enforcement
+    # 2) "Do not modify tracked files" enforcement (baseline-aware)
+    newly_dirty: set[str] = set()
     if "do not modify" in user_input.lower() and ("tracked file" in user_input.lower() or "repo code" in user_input.lower()):
-        status = _git_status_porcelain()
-        # Any change outside workspace/ is a violation
-        bad = []
-        for ln in status:
-            # porcelain format: XY <path> or similar
-            path = ln[3:] if len(ln) > 3 else ln
-            path = path.strip()
-            if path and not path.startswith("workspace/"):
-                bad.append(ln)
-        if bad:
-            failures.append("Modified tracked files unexpectedly:\n" + "\n".join(bad))
+        before = baseline_dirty_outside_ws or set()
+        after = _dirty_outside_workspace()
+        newly_dirty = after - before
+        if newly_dirty:
+            failures.append("Modified tracked files unexpectedly (new this turn):\n" + "\n".join(sorted(newly_dirty)))
 
-    # 3) Patch sanity (if prompt asked for a patch)
+# 3) Patch sanity (if prompt asked for a patch)
     if _prompt_requests_patch(user_input):
         # Find the most likely patch file requested
         patch_paths = [p for p in required if p.lower().endswith(".patch")]
@@ -245,7 +302,7 @@ def _validate_task_contract(user_input: str) -> list[str]:
             else:
                 failures.append(f"Patch file not created: {patch_paths[0]}")
 
-    return failures
+    return failures, newly_dirty
 
 
 # -----------------------------
@@ -458,6 +515,9 @@ def run_repl():
 
         state.add_message("user", user_input, node="repl")
 
+        # Baseline git dirtiness outside workspace (so we only flag NEW changes per turn)
+        baseline_dirty_outside_ws = _dirty_outside_workspace()
+
         # Controlled contract retries
         attempt = 0
         raw_result: Any = None
@@ -515,7 +575,7 @@ def run_repl():
 
             # If this was a task, enforce the contract
             if user_input.lstrip().lower().startswith("task:"):
-                failures = _validate_task_contract(user_input)
+                failures, newly_dirty = _validate_task_contract(user_input, baseline_dirty_outside_ws)
                 if failures:
                     _append_jsonl(jsonl_path, {
                         "event": "contract_fail",
@@ -530,20 +590,123 @@ def run_repl():
                         print(f"  - {f}")
                     print("")
 
+                    # Revert any newly dirtied tracked files so retries are safe
+                    _git_restore_paths(newly_dirty)
+
                     if attempt >= MAX_CONTRACT_RETRIES:
                         # Stop retrying; user can inspect logs/files
                         state.add_message("system", "[main] Contract failed after max retries.", node="main")
                         break
 
                     # Add a hard corrective instruction and retry once more
+
+
+                    # IMPORTANT: ensure the next invoke actually re-enters the task graph.
+
+
+                    tracked = _git_ls_files()
+
+
+                    filtered = []
+
+
+                    for p in tracked:
+
+
+                        if p.startswith(("workspace/", ".venv/", ".llamia_chroma/")):
+
+
+                            continue
+
+
+                        if p.endswith((".bin", ".sqlite3", ".db")):
+
+
+                            continue
+
+
+                        filtered.append(p)
+
+
+                    tracked_hint = ""
+
+
+                    if any("Patch does not touch" in f for f in failures) or any("patch" in f.lower() for f in failures):
+
+
+                        sample = filtered[:60]
+
+
+                        if sample:
+
+
+                            tracked_hint = "\nAllowed patch targets (git ls-files, filtered):\n- " + "\n- ".join(sample) + "\n"
+
+
+
                     fix_msg = (
+
+
                         "[main] CONTRACT VIOLATION.\n"
+
+
                         "You MUST fix the failures below, using ONLY workspace/ outputs.\n"
+
+
                         "Do NOT claim success until all are satisfied.\n\n"
-                        "Failures:\n- " + "\n- ".join(failures) + "\n\n"
-                        "Now regenerate the required artifacts, ensuring patch modifies REAL git-tracked files.\n"
+
+
+                        "Failures:\n- " + "\n- ".join(failures) + "\n"
+
+
+                        + tracked_hint + "\n"
+
+
+                        "Now regenerate the required artifacts.\n"
+
+
+                        "- If a unified diff was requested, it MUST modify existing git-tracked files (no invented hello.py).\n"
+
+
+                        "- Use only files under the repo root (never workspace/ as patch targets).\n"
+
+
                     )
+
+
+                    state.fix_instructions = fix_msg
+
+
+                    # Reset loop counters so critic doesn't instantly bail.
+
+
+                    state.loop_count = 0
+
+
+                    state.web_search_count = 0
+
+
+                    state.web_queue = []
+
+
+                    state.web_results = None
+
+
+                    state.research_query = None
+
+
+                    state.research_notes = None
+
+
+                    state.exec_request = None
+
+
+                    state.last_exec_results = []
+
+
                     state.add_message("system", fix_msg, node="main")
+
+
                     continue
 
             # Contract OK (or not a task)

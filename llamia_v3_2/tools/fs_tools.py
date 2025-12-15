@@ -19,6 +19,42 @@ def ensure_workspace() -> Path:
     return WORKSPACE_DIR
 
 
+
+
+def _safe_workspace_path(rel_path: str) -> Path:
+    """Resolve a user-provided relative path safely within WORKSPACE_DIR.
+
+    Prevents directory traversal (../) and absolute paths.
+    Also tolerates paths that start with "workspace/".
+    """
+    if not rel_path or not str(rel_path).strip():
+        raise ValueError("Empty file_path")
+
+    rel = str(rel_path).strip()
+
+    # Tolerate callers including the workspace prefix.
+    if rel.startswith("workspace/"):
+        rel = rel[len("workspace/") :]
+
+    # Normalize harmless leading ./
+    while rel.startswith("./"):
+        rel = rel[2:]
+
+    p = Path(rel)
+    if p.is_absolute():
+        raise ValueError(f"Absolute paths are not allowed: {rel_path}")
+
+    if any(part == ".." for part in p.parts):
+        raise ValueError(f"Directory traversal is not allowed: {rel_path}")
+
+    ws = WORKSPACE_DIR.resolve()
+    target = (WORKSPACE_DIR / p).resolve()
+
+    # Ensure target is inside workspace
+    if ws != target and ws not in target.parents:
+        raise ValueError(f"Unsafe workspace path: {rel_path}")
+
+    return target
 def _normalize_path(file_path: str) -> Path:
     """
     Interpret file_path as relative to the workspace.

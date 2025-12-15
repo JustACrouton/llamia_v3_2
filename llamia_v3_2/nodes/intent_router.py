@@ -97,6 +97,14 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
 
     last = state.messages[-1]
     if last["role"] != "user":
+        # If we're retrying a task (e.g., contract violation / repair), keep the task alive.
+        # main.py can inject fix_instructions as a system message; this branch ensures
+        # we route back into the task graph instead of falling through to chat.
+        if state.mode == "task" and state.goal and (state.fix_instructions or "").strip():
+            state.next_agent = "planner"
+            state.log(f"[{NODE_NAME}] TASK(retry): next_agent=planner")
+            return state
+
         state.next_agent = "chat"
         state.log(f"[{NODE_NAME}] last not user -> chat")
         return state

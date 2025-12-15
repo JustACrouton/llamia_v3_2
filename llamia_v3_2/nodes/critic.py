@@ -69,8 +69,13 @@ def _looks_like_needs_web(goal_text: str, stderr: str) -> bool:
     s = stderr.lower()
     if "modulenotfounderror" in s or "no module named" in s:
         return True
-    if "command not found" in s or "no such file or directory" in s:
+    if "command not found" in s:
         return True
+
+    # "No such file" is usually a local-path issue (e.g., missing file in workspace).
+    # Don't burn web searches for that.
+    if "no such file or directory" in s and "can't open file" not in s:
+        return False
     if "pip" in s and "error" in s:
         return True
 
