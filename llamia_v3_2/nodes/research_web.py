@@ -11,33 +11,24 @@ NODE_NAME = "research_web"
 def research_web_node(state: LlamiaState) -> LlamiaState:
     state.log(f"[{NODE_NAME}] starting")
 
-    if DEFAULT_CONFIG.web_search_provider != "searxng":
-        state.add_message("system", "[web_search] disabled in config.", node=NODE_NAME)
-        state.log(f"[{NODE_NAME}] disabled")
-        # route back safely
+    query = (state.research_query or "").strip()
+    if not query:
+        state.log(f"[{NODE_NAME}] no research_query; skipping")
         state.next_agent = "planner" if state.mode == "task" else "chat"
         return state
 
-    query = (state.research_query or "").strip()
+    if DEFAULT_CONFIG.web_search_provider != "searxng":
+        state.add_message("system", "[web_search] disabled in config.", node=NODE_NAME)
+        state.research_query = None
+        state.next_agent = "planner" if state.mode == "task" else "chat"
+        return state
 
-    # fallback: last user message content
-    if not query:
-        for m in reversed(state.messages):
-            if m.get("role") == "user":
-                query = (m.get("content") or "").strip()
-                break
-
-    # visible marker in history so you KNOW it ran
+    # only emit marker if we really have a query
     state.add_message(
         "system",
         f"[web_search] provider=searxng url={DEFAULT_CONFIG.searxng_url!r} query={query!r}",
         node=NODE_NAME,
     )
-
-    if not query:
-        state.add_message("system", "[web_search] no query provided.", node=NODE_NAME)
-        state.next_agent = "planner" if state.mode == "task" else "chat"
-        return state
 
     url = DEFAULT_CONFIG.searxng_url.rstrip("/") + "/search"
     params = {"q": query, "format": "json"}
@@ -50,7 +41,6 @@ def research_web_node(state: LlamiaState) -> LlamiaState:
     except Exception as e:
         state.add_message("system", f"[web_search] ERROR: {e!r}", node=NODE_NAME)
         state.log(f"[{NODE_NAME}] error={e!r}")
-        # clear trigger so we don't loop forever
         state.research_query = None
         state.next_agent = "planner" if state.mode == "task" else "chat"
         return state
@@ -68,14 +58,9 @@ def research_web_node(state: LlamiaState) -> LlamiaState:
     state.research_notes = notes
     state.add_message("system", notes, node=NODE_NAME)
 
-    # ? CRITICAL: clear the trigger so research_web does NOT re-run
     state.research_query = None
-
-    # ? Route back:
-    # - if we're in a task, planner consumes research_notes and continues
-    # - if we're in chat (explicit web:), go to chat
     state.next_agent = "planner" if state.mode == "task" else "chat"
-
     state.log(f"[{NODE_NAME}] got_results={len(results)} next_agent={state.next_agent}")
     return state
+
 

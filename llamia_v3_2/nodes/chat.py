@@ -15,16 +15,28 @@ def _tail(s: str, n: int) -> str:
     return s if len(s) <= n else s[-n:]
 
 
+def _strip_repl_prefix(text: str) -> str:
+    s = (text or "").strip()
+    while s.lower().startswith("you>"):
+        s = s[4:].lstrip()
+    return s
+
+
 def _latest_user_text(state: LlamiaState) -> str:
     for m in reversed(state.messages):
         if m.get("role") == "user":
-            return (m.get("content") or "").strip()
+            return _strip_repl_prefix(m.get("content") or "").strip()
     return ""
 
 
 def _looks_like_web_query(text: str) -> bool:
-    t = (text or "").strip().lower()
+    t = _strip_repl_prefix(text).strip().lower()
     return t.startswith("web:") or t.startswith("search:")
+
+
+def _looks_like_repo_research_query(text: str) -> bool:
+    t = _strip_repl_prefix(text).strip().lower()
+    return t.startswith("research:") or t.startswith("reindex:")
 
 
 def _last_user_index(state: LlamiaState) -> int:
@@ -38,9 +50,26 @@ def _web_ran_this_turn(state: LlamiaState) -> bool:
     ui = _last_user_index(state)
     if ui < 0:
         return False
-    for m in state.messages[ui + 1 :]:
+
+    for m in state.messages[ui + 1:]:
         if m.get("role") == "system" and m.get("node") == "research_web":
-            return True
+            c = (m.get("content") or "").strip()
+            # ONLY count as “ran” if we have actual results
+            if c.startswith("[web_search results]"):
+                return True
+    return False
+
+
+def _research_ran_this_turn(state: LlamiaState) -> bool:
+    ui = _last_user_index(state)
+    if ui < 0:
+        return False
+
+    for m in state.messages[ui + 1:]:
+        if m.get("role") == "system" and m.get("node") == "research":
+            c = (m.get("content") or "").strip()
+            if c.startswith("[research results]"):
+                return True
     return False
 
 
@@ -118,12 +147,21 @@ def _web_final_message(state: LlamiaState) -> str:
     return f"Here are the web results I fetched:\n\n{snippet}"
 
 
+def _research_final_message(state: LlamiaState) -> str:
+    notes = (state.research_notes or "").strip()
+    if not notes:
+        return "No repo research results were captured."
+    lines = notes.splitlines()
+    snippet = "\n".join(lines[:60]).strip()
+    return f"Here are the repo research results:\n\n{snippet}"
+
+
 def _trim_history_for_llm(state: LlamiaState, max_pairs: int = 10) -> list[dict]:
     msgs: list[dict] = []
     for m in state.messages:
         if m.get("role") in ("user", "assistant"):
             msgs.append({"role": m["role"], "content": m.get("content", "")})
-    return msgs[-(2 * max_pairs) :]
+    return msgs[-(2 * max_pairs):]
 
 
 CHAT_GUARD_PROMPT = """You are Llamia's chat surface.
@@ -152,7 +190,15 @@ def chat_node(state: LlamiaState) -> LlamiaState:
         state.log(f"[{NODE_NAME}] finished (task summary) reply_len={len(reply)}")
         return state
 
-    # 2) Web query: deterministic summary (no LLM call)
+    # 2) Repo research: deterministic summary (no LLM call)
+    if _looks_like_repo_research_query(user_text) or _research_ran_this_turn(state):
+        reply = _research_final_message(state)
+        state.add_message("assistant", reply, node=NODE_NAME)
+        state.responded_turn_id = state.turn_id
+        state.log(f"[{NODE_NAME}] finished (research summary) reply_len={len(reply)}")
+        return state
+
+    # 3) Web query: deterministic summary (no LLM call)
     if _looks_like_web_query(user_text) or _web_ran_this_turn(state):
         reply = _web_final_message(state)
         state.add_message("assistant", reply, node=NODE_NAME)
@@ -160,7 +206,7 @@ def chat_node(state: LlamiaState) -> LlamiaState:
         state.log(f"[{NODE_NAME}] finished (web summary) reply_len={len(reply)}")
         return state
 
-    # 3) Normal chat: use model
+    # 4) Normal chat: use model
     has_user = any(m.get("role") == "user" for m in state.messages)
     if not has_user:
         state.log(f"[{NODE_NAME}] no user messages in history; nothing to do")

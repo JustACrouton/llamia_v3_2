@@ -78,14 +78,14 @@ DEFAULT_CONFIG = LlamiaConfig(
     planner_model=ModelConfig(
         provider="openai_compatible",
         model="qwq:32b",
-        context_window=32768,
+        context_window=131072,
         temperature=0.2,
         max_output_tokens=2048,
     ),
     coder_model=ModelConfig(
         provider="openai_compatible",
         model="qwen2.5-coder:32b",
-        context_window=32768,
+        context_window=131072,
         temperature=0.2,
         max_output_tokens=2048,
     ),
@@ -99,7 +99,7 @@ DEFAULT_CONFIG = LlamiaConfig(
     critic_model=ModelConfig(
         provider="openai_compatible",
         model="qwq:32b",
-        context_window=32768,
+        context_window=131072,
         temperature=0.2,
         max_output_tokens=1024,
     ),

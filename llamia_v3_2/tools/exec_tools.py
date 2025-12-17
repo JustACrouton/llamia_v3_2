@@ -18,16 +18,28 @@ ALLOWED_BINARIES = {
 }
 
 # Disallow shell metacharacters (no chaining / redirects).
-DISALLOWED_TOKENS = ["&&", "||", "|", ";", ">", "<", "`", "$(", "${"]
+# IMPORTANT: we only block these when they appear as SEPARATE argv tokens after shlex.split(),
+# not as substrings inside quoted arguments (e.g. python -c "import os; print(...)").
+DISALLOWED_ARG_TOKENS = {"&&", "||", "|", ">", "<", "`"}
+
+
+def _special_case_git_diff_redirect(cmd: str) -> Path | None:
+    """
+    Allow exactly:
+      git diff --no-color > workspace/IMPROVEMENTS.patch
+    without invoking a shell redirect.
+    Returns output path if matched.
+    """
+    normalized = " ".join(cmd.strip().split())
+    if normalized == "git diff --no-color > workspace/IMPROVEMENTS.patch":
+        return (ROOT_DIR / "workspace" / "IMPROVEMENTS.patch").resolve()
+    return None
 
 
 def _is_safe_command(cmd: str) -> bool:
     c = cmd.strip()
     if not c:
         return False
-    for tok in DISALLOWED_TOKENS:
-        if tok in c:
-            return False
 
     try:
         parts = shlex.split(c)
@@ -35,6 +47,11 @@ def _is_safe_command(cmd: str) -> bool:
         return False
 
     if not parts:
+        return False
+
+    # Block shell operators only when they are separate argv tokens.
+    # This prevents "python -c ... | cat" etc, while allowing semicolons inside python -c strings.
+    if any(p in DISALLOWED_ARG_TOKENS for p in parts):
         return False
 
     exe = parts[0]
@@ -109,6 +126,37 @@ def run_exec_request(req: ExecRequest) -> list[ExecResult]:
 
     for cmd in req.commands:
         cmd = str(cmd).strip()
+        out_path = _special_case_git_diff_redirect(cmd)
+        if out_path is not None:
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                proc = subprocess.run(
+                    ["git", "diff", "--no-color"],
+                    cwd=str(wd),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if proc.returncode == 0:
+                    out_path.write_text(proc.stdout or "", encoding="utf-8")
+                res = ExecResult(
+                    command=cmd,
+                    returncode=int(proc.returncode),
+                    stdout=f"Wrote git diff output to {out_path.relative_to(ROOT_DIR)}",
+                    stderr=proc.stderr or "",
+                )
+            except Exception as e:
+                res = ExecResult(
+                    command=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr=f"Special-case git diff redirect failed: {e!r}",
+                )
+
+            results.append(res)
+            prev_cmd, prev_rc = cmd, res.returncode
+            continue
+
         if not cmd:
             continue
 
