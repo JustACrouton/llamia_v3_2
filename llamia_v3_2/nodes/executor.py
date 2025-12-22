@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..state import LlamiaState
 from ..tools.exec_tools import run_exec_request
+from .failure_handler import handle_failures
 
 NODE_NAME = "executor"
 
@@ -53,4 +54,6 @@ def executor_node(state: LlamiaState) -> LlamiaState:
 
     state.add_message("system", "\n".join(lines), node=NODE_NAME)
     state.log(f"[{NODE_NAME}] ran {len(results)} commands")
+    # Handle failures if any
+    state = handle_failures(state)
     return state

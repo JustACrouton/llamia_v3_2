@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..config import DEFAULT_CONFIG
@@ -9,29 +10,30 @@ from ..state import LlamiaState, PlanStep
 
 NODE_NAME = "planner"
 
-PLANNER_SYSTEM_PROMPT = """You are a planning agent for an autonomous developer assistant. The system is running Linux. For common tasks like checking disk space, suggest direct commands (e.g., "df -h") in the plan steps.
+PLANNER_SYSTEM_PROMPT = """You are an expert planning agent for an autonomous developer assistant. The system runs on Linux. Your role is to decompose complex goals into executable, sequential steps that can be carried out by specialized agents.
 
-Your job:
-- Read the user's HIGH-LEVEL GOAL.
-- Produce a small, linear plan of 3-7 steps MAX.
-- Each step should be short, clear, and actionable.
-- Do NOT write any code here; just describe the steps.
+PLANNING PRINCIPLES:
+- Create 2-8 steps maximum for most tasks
+- Each step should be specific, actionable, and testable
+- Include verification/checking steps when appropriate
+- For technical tasks, specify relevant commands or tools
+- Consider dependencies between steps
+- If the goal involves multiple domains, plan for appropriate handoffs
 
-STRICT OUTPUT RULES:
-- Output MUST be valid JSON only.
-- No prose, no markdown fences, no comments.
-- Output must start with '{' and end with '}'.
+OUTPUT FORMAT:
+- Return ONLY valid JSON with a "plan" array
+- Each step has: "id", "description", "status" (always "pending")
 
-You MUST respond with STRICT JSON ONLY in this format:
-
+STRICT JSON FORMAT:
 {
   "plan": [
-    {"id": 1, "description": "First step description"},
-    {"id": 2, "description": "Second step description"}
+    {
+      "id": 1,
+      "description": "Step description"
+    }
   ]
 }
 """
-
 
 def _needs_web_search(goal: str) -> bool:
     """
@@ -67,6 +69,19 @@ def _needs_web_search(goal: str) -> bool:
         "version",
         "release notes",
         "searxng",
+        "install",
+        "setup",
+        "configuration",
+        "tutorial",
+        "example",
+        "best practice",
+        "security",
+        "compatibility",
+        "dependency",
+        "library",
+        "framework",
+        "protocol",
+        "standard",
     ]
     return any(x in t for x in triggers)
 
@@ -76,7 +91,7 @@ def _try_parse_json_object(raw: str) -> dict[str, Any] | None:
         return None
     s = raw.strip()
 
-    # Fast path
+    # Fast path - direct JSON
     if s.startswith("{") and s.endswith("}"):
         try:
             obj = json.loads(s)
@@ -84,7 +99,17 @@ def _try_parse_json_object(raw: str) -> dict[str, Any] | None:
         except Exception:
             pass
 
-    # Extract likely JSON object
+    # Extract JSON from markdown or mixed content
+    json_match = re.search(r'\{(?:[^{}]|{[^{}]*})*\}', s)
+    if json_match:
+        candidate = json_match.group(0)
+        try:
+            obj = json.loads(candidate)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+
+    # Fallback: find content between first { and last }
     a = s.find("{")
     b = s.rfind("}")
     if a >= 0 and b > a:
@@ -103,15 +128,67 @@ def _retry_strict_json(messages: list[dict[str, str]], model_cfg) -> str:
         {
             "role": "system",
             "content": (
-                "STRICT MODE: Your last output was NOT valid JSON.\n"
-                "Return STRICT JSON ONLY with a 'plan' list.\n"
-                "No prose. No markdown fences.\n"
-                "Output must start with '{' and end with '}'."
+                "ERROR: Your last response was not valid JSON.\n"
+                "PRODUCE ONLY JSON with a 'plan' field containing an array of steps.\n"
+                "NO TEXT BEFORE OR AFTER JSON.\n"
+                "Format: {\"plan\": [{\"id\": 1, \"description\": \"...\"}]}\n"
+                "START YOUR RESPONSE WITH { and END WITH }"
             ),
             "node": NODE_NAME,
         }
     )
     return chat_completion(messages=retry_msgs, model_cfg=model_cfg)
+
+
+def _analyze_goal_complexity(goal: str) -> str:
+    """Analyze the goal to determine appropriate planning strategy."""
+    goal_lower = goal.lower()
+    
+    # Multi-domain goals that need careful planning
+    if any(keyword in goal_lower for keyword in [
+        "refactor", "migrate", "update dependencies", "security audit", 
+        "performance optimization", "debug complex", "fix multiple"
+    ]):
+        return "complex"
+    
+    # Simple, direct commands
+    elif any(keyword in goal_lower for keyword in [
+        "check", "list", "show", "display", "find file", "search file",
+        "what is", "where is", "how much", "how many"
+    ]):
+        return "simple"
+    
+    # Development tasks
+    elif any(keyword in goal_lower for keyword in [
+        "add", "create", "implement", "write", "build", "test", "deploy"
+    ]):
+        return "development"
+    
+    return "standard"
+
+
+def _enhance_plan_with_context(plan_steps: list[dict], goal: str, research_notes: str = "") -> list[PlanStep]:
+    """Enhance the plan with additional context and validation."""
+    enhanced_steps = []
+    
+    for i, step in enumerate(plan_steps):
+        if not isinstance(step, dict):
+            continue
+            
+        desc = str(step.get("description", "")).strip()
+        if not desc:
+            continue
+            
+        sid = int(step.get("id", i + 1))
+        
+        # Create PlanStep with only the original expected fields
+        enhanced_steps.append(PlanStep(
+            id=sid, 
+            description=desc, 
+            status="pending"
+        ))
+    
+    return enhanced_steps
 
 
 def planner_node(state: LlamiaState) -> LlamiaState:
@@ -121,7 +198,7 @@ def planner_node(state: LlamiaState) -> LlamiaState:
         state.log(f"[{NODE_NAME}] no goal in task mode; nothing to plan")
         return state
 
-    # Option B: planner can request web search before planning
+    # Check if web search is needed before planning
     if (
         DEFAULT_CONFIG.web_search_provider == "searxng"
         and not (state.research_notes or "").strip()
@@ -137,16 +214,36 @@ def planner_node(state: LlamiaState) -> LlamiaState:
         state.log(f"[{NODE_NAME}] routed to research_web query={state.research_query!r}")
         return state
 
+    # Prepare context for planning
     notes = (state.research_notes or "").strip()
     notes_block = f"\n\nWeb research notes:\n{notes}\n" if notes else ""
+    
+    # Add context about current directory/file context if available
+    context_block = ""
+    if hasattr(state, 'current_file') and state.current_file:
+        context_block += f"\nCurrent file context: {state.current_file}\n"
+    if hasattr(state, 'working_dir') and state.working_dir:
+        context_block += f"Current working directory: {state.working_dir}\n"
+
+    # Determine planning strategy based on goal complexity
+    complexity = _analyze_goal_complexity(state.goal)
+    
+    # Customize prompt based on complexity
+    prompt = PLANNER_SYSTEM_PROMPT
+    if complexity == "complex":
+        prompt += "\nFor complex tasks: break into smaller, manageable phases with verification between phases."
+    elif complexity == "simple":
+        prompt += "\nFor simple tasks: focus on direct, efficient execution steps."
+    elif complexity == "development":
+        prompt += "\nFor development tasks: include testing and verification steps."
 
     messages = [
-        {"role": "system", "content": PLANNER_SYSTEM_PROMPT, "node": NODE_NAME},
-        {"role": "user", "content": f"Goal: {state.goal}{notes_block}", "node": NODE_NAME},
+        {"role": "system", "content": prompt, "node": NODE_NAME},
+        {"role": "user", "content": f"Goal: {state.goal}{context_block}{notes_block}", "node": NODE_NAME},
     ]
 
     cfg = DEFAULT_CONFIG.model_for("planner")
-    state.log(f"[{NODE_NAME}] using model={cfg.model} temp={cfg.temperature}")
+    state.log(f"[{NODE_NAME}] using model={cfg.model} temp={cfg.temperature} complexity={complexity}")
 
     raw = chat_completion(messages=messages, model_cfg=cfg)
     state.log(f"[{NODE_NAME}] raw LLM output: {raw!r}")
@@ -166,23 +263,39 @@ def planner_node(state: LlamiaState) -> LlamiaState:
         if not isinstance(raw_plan, list):
             raise ValueError("plan field is not a list")
 
-        for i, step in enumerate(raw_plan, start=1):
-            if not isinstance(step, dict):
-                continue
-            desc = str(step.get("description", "")).strip()
-            if not desc:
-                continue
-            sid = int(step.get("id", i))
-            plan_steps.append(PlanStep(id=sid, description=desc, status="pending"))
+        # Enhance the plan with context and validation
+        enhanced_plan = _enhance_plan_with_context(raw_plan, state.goal, notes)
+        plan_steps = enhanced_plan
 
         if not plan_steps:
             raise ValueError("empty plan")
 
+        # Ensure plan steps are properly numbered sequentially
+        for i, step in enumerate(plan_steps, start=1):
+            step.id = i
+
     except Exception as e:
         state.log(f"[{NODE_NAME}] ERROR parsing plan JSON: {e!r}")
-        plan_steps = [PlanStep(id=1, description=f"Attempt to solve goal: {state.goal}", status="pending")]
+        # Fallback: create a simple plan
+        plan_steps = [
+            PlanStep(
+                id=1, 
+                description=f"Analyze and execute the goal: {state.goal}", 
+                status="pending"
+            )
+        ]
 
     state.plan = plan_steps
-    state.next_agent = None  # important: don't “stick” routing hints
-    state.log(f"[{NODE_NAME}] created {len(plan_steps)} plan steps")
+    state.next_agent = None  # Reset routing - let execution flow naturally
+    state.log(f"[{NODE_NAME}] created {len(plan_steps)} plan steps: {[step.description for step in plan_steps]}")
+    
+    # Add plan summary to messages for context
+    if plan_steps:
+        plan_summary = "\n".join([f"Step {step.id}: {step.description}" for step in plan_steps])
+        state.add_message(
+            "system",
+            f"Generated execution plan:\n{plan_summary}",
+            node=NODE_NAME,
+        )
+
     return state
