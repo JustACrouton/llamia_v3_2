@@ -105,12 +105,14 @@ def _extract_repo_research_query(text: str) -> str:
 def intent_router_node(state: LlamiaState) -> LlamiaState:
     state.log(f"[{NODE_NAME}] starting")
 
+    # Always ensure trace is a list
     try:
         state.trace = list(getattr(state, "trace", []) or [])
     except Exception:
         state.trace = []
 
     def _trace(event: str, **kw: Any) -> None:
+        # Keep trace as structured dicts (graph.py wraps a separate string trace line too)
         state.trace.append(
             {
                 "node": NODE_NAME,
@@ -121,7 +123,8 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
             }
         )
 
-    if not state.messages:
+    # If no messages, start in chat
+    if not getattr(state, "messages", None):
         state.mode = "chat"
         state.goal = None
         state.research_query = None
@@ -133,27 +136,35 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         state.fix_instructions = None
         state.next_agent = "chat"
         state.log(f"[{NODE_NAME}] no messages -> chat")
+        _trace("route", kind="chat", next_agent="chat")
         return state
 
     last = state.messages[-1]
-    if last["role"] != "user":
-        # If we're retrying a task (e.g., contract violation / repair), keep the task alive.
+
+    # If last message is not user, this is usually an internal retry cycle.
+    if not isinstance(last, dict) or last.get("role") != "user":
+        # Contract-violation repair path: keep the task alive.
         if state.mode == "task" and state.goal and (state.fix_instructions or "").strip():
-            state.next_agent = "planner"
-            state.log(f"[{NODE_NAME}] TASK(retry): next_agent=planner")
+            # If something upstream already selected a retry target, honor it.
+            if state.next_agent not in {"planner", "coder", "research", "research_web", "chat"}:
+                # Default for repair is coder (it must regenerate artifacts)
+                state.next_agent = "coder"
+            state.log(f"[{NODE_NAME}] TASK(retry): next_agent={state.next_agent}")
+            _trace("route", kind="task_retry", next_agent=state.next_agent)
             return state
 
         state.next_agent = "chat"
         state.log(f"[{NODE_NAME}] last not user -> chat")
+        _trace("route", kind="chat", next_agent="chat")
         return state
 
-    text = _strip_repl_prefix(last["content"])
+    text = _strip_repl_prefix(str(last.get("content", "") or ""))
     lower = text.lower().strip()
 
     # 0) Explicit web search (highest priority)
     if _looks_like_web_search(text):
         q = _extract_web_query(text)
-        state.mode = "chat"  # prevent stale task mode
+        state.mode = "chat"
         state.goal = None
         state.research_query = q
         state.research_notes = None
@@ -169,7 +180,7 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     # 0.5) Explicit repo research (RAG)
     if _looks_like_repo_research(text):
         q = _extract_repo_research_query(text)
-        state.mode = "chat"  # treat as chat-like query, not a task pipeline
+        state.mode = "chat"
         state.goal = None
         state.research_query = q
         state.research_notes = None

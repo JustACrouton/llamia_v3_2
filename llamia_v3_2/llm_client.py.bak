@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import os
-import logging
 from typing import Iterable
 
-from openai import OpenAI, APIError, APITimeoutError
+from openai import OpenAI
 
 from .config import DEFAULT_CONFIG, ModelConfig
 from .state import Message
 
-# Set up logging
-logger = logging.getLogger(__name__)
 
 def _make_client() -> OpenAI:
     """
@@ -74,22 +71,11 @@ def chat_completion(
         for m in messages
     ]
 
-    try:
-        resp = client.chat.completions.create(
-            model=cfg.model,
-            messages=api_messages,
-            temperature=cfg.temperature,
-            max_tokens=cfg.max_output_tokens,
-        )
-        
-        content = resp.choices[0].message.content or ""
-        return content
-    except APITimeoutError as e:
-        logger.error(f"API timeout error: {e}")
-        return "Error: Request to LLM timed out. Please try again."
-    except APIError as e:
-        logger.error(f"API error: {e}")
-        return f"Error: Failed to get response from LLM. Details: {str(e)}"
-    except Exception as e:
-        logger.error(f"Unexpected error in chat_completion: {e}")
-        return f"Error: Unexpected issue when calling LLM. Details: {str(e)}"
+    resp = client.chat.completions.create(
+        model=cfg.model,
+        messages=api_messages,
+        temperature=cfg.temperature,
+        max_tokens=cfg.max_output_tokens,
+    )
+
+    return resp.choices[0].message.content or ""

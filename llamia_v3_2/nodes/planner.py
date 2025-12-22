@@ -9,7 +9,7 @@ from ..state import LlamiaState, PlanStep
 
 NODE_NAME = "planner"
 
-PLANNER_SYSTEM_PROMPT = """You are a planning agent for an autonomous developer assistant.
+PLANNER_SYSTEM_PROMPT = """You are a planning agent for an autonomous developer assistant. The system is running Linux. For common tasks like checking disk space, suggest direct commands (e.g., "df -h") in the plan steps.
 
 Your job:
 - Read the user's HIGH-LEVEL GOAL.

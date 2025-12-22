@@ -1,0 +1,17 @@
+main.py: No syntax errors found
+
+=== Pylint Code Quality Report ===
+************* Module main
+/home/jhon/llamia_v3_2/main.py:1:0: C0114: Missing module docstring (missing-module-docstring)
+/home/jhon/llamia_v3_2/main.py:4:0: W0105: String statement has no effect (pointless-string-statement)
+/home/jhon/llamia_v3_2/main.py:13:0: C0413: Import "import sys" should be placed at the top of the module (wrong-import-position)
+/home/jhon/llamia_v3_2/main.py:15:0: C0413: Import "from llamia_v3_2.repl.app import run_repl" should be placed at the top of the module (wrong-import-position)
+
+-----------------------------------
+Your code has been rated at 3.33/10
+
+
+=== Mypy Type Checking Report ===
+mypy: can't decode file '/home/jhon/llamia_v3_2/llamia_v3_2/nodes/chat.py': 'utf-8' codec can't decode byte 0x93 in position 1494: invalid start byte
+
+=== Radon Complexity Analysis ===

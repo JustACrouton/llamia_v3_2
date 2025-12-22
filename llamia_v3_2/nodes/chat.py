@@ -99,6 +99,8 @@ def _format_exec_summary(state: LlamiaState) -> tuple[str, bool]:
         lines.append(f"- {r.command} -> {status}")
 
         out_tail = _tail((r.stdout or "").strip(), MAX_STD_TAIL).strip()
+        if out_tail:
+            lines.append(f"  stdout (tail):\n    {out_tail}")
         err_tail = _tail((r.stderr or "").strip(), MAX_ERR_TAIL).strip()
 
         if out_tail:

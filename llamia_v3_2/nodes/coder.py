@@ -74,7 +74,16 @@ def _parse_patches_from_json(data: dict[str, Any]) -> list[CodePatch]:
         fp = str(p.get("file_path", f"file_{idx}.txt")).strip()
         if not fp:
             continue
-        content = str(p.get("content", "")).replace("\r\n", "\n")
+        raw_content = p.get("content", None)
+        raw_lines = p.get("content_lines", None)
+
+        # PATCH-PROPOSAL: prefer content_lines to keep JSON valid.
+        if raw_content is None and isinstance(raw_lines, list):
+            content = "\n".join(str(x) for x in raw_lines)
+        else:
+            content = str(raw_content or "")
+
+        content = content.replace("\r\n", "\n")
         mode = str(p.get("apply_mode", "overwrite")).lower()
         if mode not in ("overwrite", "append"):
             mode = "overwrite"

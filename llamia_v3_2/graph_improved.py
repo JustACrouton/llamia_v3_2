@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable
 
 from langgraph.graph import StateGraph, END
@@ -15,6 +16,8 @@ from .nodes.research import research_node
 from .nodes.critic import critic_node
 from .nodes.research_web import research_web_node
 
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # -----------------------------
 # Trace helpers (trace is list[str] in state.py)
@@ -50,30 +53,25 @@ def _last_msg_summary(state: Any) -> dict[str, Any]:
     }
 
 
-def _exec_req_summary(state: Any) -> dict[str, Any] | None:
+def _exec_req_summary(state: Any) -> dict[str, Any]:
     req = _get_attr(state, "exec_request", None)
-    if req is None:
-        return None
-    try:
-        workdir = getattr(req, "workdir", None)
-        cmds = list(getattr(req, "commands", []) or [])
-    except Exception:
-        return None
+    if not req:
+        return {"workdir": None, "commands_len": 0}
 
-    shown = [str(c) for c in cmds[:6]]
-    return {"workdir": workdir, "commands": shown, "more": max(0, len(cmds) - len(shown))}
+    cmds = getattr(req, "commands", None) or []
+    return {
+        "workdir": getattr(req, "workdir", None),
+        "commands_len": len(cmds),
+    }
 
 
 def _snapshot(state: Any) -> dict[str, Any]:
-    plan = _get_attr(state, "plan", []) or []
-    applied = _get_attr(state, "applied_patches", []) or []
-    exec_results = _get_attr(state, "exec_results", []) or []
-
+    plan = _get_attr(state, "plan", [])
+    applied = _get_attr(state, "applied_patches", [])
+    exec_results = _get_attr(state, "exec_results", [])
     return {
         "mode": _get_attr(state, "mode", None),
-        "next_agent": _get_attr(state, "next_agent", None),
-        "goal_head": _safe_head(_get_attr(state, "goal", None), 260),
-        "loop_count": _get_attr(state, "loop_count", None),
+        "goal": _get_attr(state, "goal", None),
         "web_search_count": _get_attr(state, "web_search_count", None),
         "research_query": _get_attr(state, "research_query", None),
         "has_fix_instructions": bool(str(_get_attr(state, "fix_instructions", "") or "").strip()),
@@ -105,7 +103,13 @@ def _wrap_step(
         before = _snapshot(state)
         _trace(state, {"event": "node_enter", "node": name, "snap": before})
 
-        out = fn(state)
+        try:
+            out = fn(state)
+        except Exception as e:
+            logger.error(f"Error in node {name}: {e}")
+            # Log the error but continue with the original state
+            _trace(state, {"event": "node_error", "node": name, "error": str(e)})
+            return state
 
         after = _snapshot(out)
         delta = {
@@ -122,9 +126,15 @@ def _wrap_step(
 
 def _wrap_router(name: str, router_fn: Callable[[Any], str]) -> Callable[[Any], str]:
     def _r(state: Any) -> str:
-        choice = router_fn(state)
-        _trace(state, {"event": "route", "node": name, "choice": choice, "snap": _snapshot(state)})
-        return choice
+        try:
+            choice = router_fn(state)
+            _trace(state, {"event": "route", "node": name, "choice": choice, "snap": _snapshot(state)})
+            return choice
+        except Exception as e:
+            logger.error(f"Error in router {name}: {e}")
+            # Default to chat node on error
+            _trace(state, {"event": "route_error", "node": name, "error": str(e), "choice": "chat"})
+            return "chat"
 
     return _r
 
@@ -133,95 +143,126 @@ def _wrap_router(name: str, router_fn: Callable[[Any], str]) -> Callable[[Any], 
 # Routing helpers
 # -----------------------------
 def _get_mode_and_goal(state: Any) -> tuple[str, str | None]:
-    if hasattr(state, "mode"):
-        return getattr(state, "mode"), getattr(state, "goal", None)
-    if isinstance(state, dict):
-        return state.get("mode", "chat"), state.get("goal")
-    return "chat", None
+    try:
+        if hasattr(state, "mode"):
+            return getattr(state, "mode"), getattr(state, "goal", None)
+        if isinstance(state, dict):
+            return state.get("mode", "chat"), state.get("goal")
+        return "chat", None
+    except Exception as e:
+        logger.error(f"Error in _get_mode_and_goal: {e}")
+        return "chat", None
 
 
 def _latest_user_text(state: Any) -> str:
-    msgs = _get_attr(state, "messages", []) or []
-    if not isinstance(msgs, list):
+    try:
+        msgs = _get_attr(state, "messages", []) or []
+        if not isinstance(msgs, list):
+            return ""
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "user":
+                return str(m.get("content", "")).strip()
         return ""
-    for m in reversed(msgs):
-        if isinstance(m, dict) and m.get("role") == "user":
-            return str(m.get("content", "")).strip()
-    return ""
+    except Exception as e:
+        logger.error(f"Error in _latest_user_text: {e}")
+        return ""
 
 
 def _looks_like_research(user_text: str) -> bool:
-    t = user_text.lower().strip()
-    if t.startswith("research:") or t.startswith("reindex:"):
-        return True
-    keywords = ["workspace", "repo", "repository", "project files", "codebase", "in this folder"]
-    intents = ["what files", "list files", "show files", "summarize files", "what does this do", "explain this project"]
-    return any(k in t for k in keywords) and any(i in t for i in intents)
+    try:
+        t = user_text.lower().strip()
+        if t.startswith("research:") or t.startswith("reindex:"):
+            return True
+        keywords = ["workspace", "repo", "repository", "project files", "codebase", "in this folder"]
+        intents = ["what files", "list files", "show files", "summarize files", "what does this do", "explain this project"]
+        return any(k in t for k in keywords) and any(i in t for i in intents)
+    except Exception as e:
+        logger.error(f"Error in _looks_like_research: {e}")
+        return False
 
 
 def _route_from_intent(state: Any) -> str:
-    nxt = _get_attr(state, "next_agent", None)
-    allowed = {"chat", "planner", "research", "research_web"}
-    if isinstance(nxt, str) and nxt in allowed:
-        return nxt
+    try:
+        nxt = _get_attr(state, "next_agent", None)
+        allowed = {"chat", "planner", "research", "research_web"}
+        if isinstance(nxt, str) and nxt in allowed:
+            return nxt
 
-    user_text = _latest_user_text(state)
-    if _looks_like_research(user_text):
-        return "research"
+        user_text = _latest_user_text(state)
+        if _looks_like_research(user_text):
+            return "research"
 
-    mode, goal = _get_mode_and_goal(state)
-    if mode == "task" and goal:
-        return "planner"
+        mode, goal = _get_mode_and_goal(state)
+        if mode == "task" and goal:
+            return "planner"
 
-    return "chat"
+        return "chat"
+    except Exception as e:
+        logger.error(f"Error in _route_from_intent: {e}")
+        return "chat"
 
 
 def _route_from_planner(state: Any) -> str:
-    # Honor explicit next_agent set by planner_node (or upstream fix-instructions)
-    nxt = _get_attr(state, "next_agent", None)
-    if isinstance(nxt, str) and nxt in {"research_web", "research"}:
-        return nxt
+    try:
+        # Honor explicit next_agent set by planner_node (or upstream fix-instructions)
+        nxt = _get_attr(state, "next_agent", None)
+        if isinstance(nxt, str) and nxt in {"research_web", "research"}:
+            return nxt
 
-    # Optional heuristic: patch/diff tasks often benefit from repo context
-    goal = str(_get_attr(state, "goal", "") or "").lower()
-    if ("diff" in goal or "patch" in goal or "improvements.patch" in goal) and not _get_attr(state, "research_notes", None):
-        return "research"
+        # Optional heuristic: patch/diff tasks often benefit from repo context
+        goal = str(_get_attr(state, "goal", "") or "").lower()
+        if ("diff" in goal or "patch" in goal or "improvements.patch" in goal) and not _get_attr(state, "research_notes", None):
+            return "research"
 
-    return "coder"
+        return "coder"
+    except Exception as e:
+        logger.error(f"Error in _route_from_planner: {e}")
+        return "coder"
 
 
 def _route_from_research(state: Any) -> str:
-    mode, goal = _get_mode_and_goal(state)
-    if mode == "task" and goal:
-        return "planner"
-    return "chat"
+    try:
+        mode, goal = _get_mode_and_goal(state)
+        if mode == "task" and goal:
+            return "planner"
+        return "chat"
+    except Exception as e:
+        logger.error(f"Error in _route_from_research: {e}")
+        return "chat"
 
 
 def _route_from_research_web(state: Any) -> str:
-    mode, goal = _get_mode_and_goal(state)
-    if mode != "task" or not goal:
-        return "chat"
-
-    plan = _get_attr(state, "plan", []) or []
-    if isinstance(plan, list) and len(plan) == 0:
-        return "planner"
-    return "coder"
+    try:
+        nxt = _get_attr(state, "next_agent", None)
+        if isinstance(nxt, str) and nxt in {"coder", "planner", "research", "research_web"}:
+            return nxt
+        return "executor"
+    except Exception as e:
+        logger.error(f"Error in _route_from_research_web: {e}")
+        return "executor"
 
 
 def _route_from_coder(state: Any) -> str:
-    # Honor coder's request first (retry loops or research handoff)
-    nxt = _get_attr(state, "next_agent", None)
-    if isinstance(nxt, str) and nxt in {"coder", "research", "research_web"}:
-        return nxt
-    return "executor"
+    try:
+        nxt = _get_attr(state, "next_agent", None)
+        if isinstance(nxt, str) and nxt in {"coder", "research", "research_web", "executor"}:
+            return nxt
+        return "executor"
+    except Exception as e:
+        logger.error(f"Error in _route_from_coder: {e}")
+        return "executor"
 
 
 def _route_from_critic(state: Any) -> str:
-    nxt = _get_attr(state, "next_agent", None)
-    allowed = {"chat", "planner", "coder", "research", "research_web"}
-    if isinstance(nxt, str) and nxt in allowed:
-        return nxt
-    return "chat"
+    try:
+        nxt = _get_attr(state, "next_agent", None)
+        allowed = {"chat", "planner", "coder", "research", "research_web"}
+        if isinstance(nxt, str) and nxt in allowed:
+            return nxt
+        return "chat"
+    except Exception as e:
+        logger.error(f"Error in _route_from_critic: {e}")
+        return "chat"
 
 
 def build_llamia_graph():
@@ -286,4 +327,3 @@ def build_llamia_graph():
 
     workflow.add_edge("chat", END)
     return workflow.compile()
-
