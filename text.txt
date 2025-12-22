@@ -1,0 +1,73 @@
+Project Summary
+High-level purpose
+This repository implements “Llamia v3.2,” a multi-agent, LangGraph-based REPL that routes user input through specialized agents (planner, coder, executor, critic, research, chat) to solve tasks or answer questions. The entrypoint (main.py) is intentionally minimal and delegates to the REPL loop under llamia_v3_2/repl. (Sources: main.py, llamia_v3_2/repl/app.py)
+
+Core architecture & flow
+REPL loop & turn lifecycle
+The REPL (llamia_v3_2/repl/app.py) initializes LlamiaState, constructs the LangGraph workflow, logs turn events, injects repo snapshots for task prompts, and manages retries/timeouts/contract validation. It drives the main loop and handles exit conditions. (Source: llamia_v3_2/repl/app.py)
+
+State model
+The shared LlamiaState defines message history, task metadata (goal, plan), patch/execution data, research/web fields, loop counters, and debug traces. This is the state object passed through LangGraph nodes. (Source: llamia_v3_2/state.py)
+
+Graph routing
+build_llamia_graph() wires nodes and conditional routing (intent_router ? research/research_web/planner/chat; planner ? coder/research/research_web; coder ? executor/research; executor ? critic; critic ? next step or chat). Trace wrappers capture node enter/exit and routing decisions. (Source: llamia_v3_2/graph.py)
+
+Intent routing
+intent_router detects task prompts, web/search requests, repo research requests, and retry flows. It sets the next_agent appropriately and initializes/reset key state fields. (Source: llamia_v3_2/nodes/intent_router.py)
+
+Planner
+The planner uses an LLM to emit a strictly-JSON plan (3–7 steps). It may trigger web research first if the goal seems to need external info and if SearXNG is configured. (Source: llamia_v3_2/nodes/planner.py)
+
+Coder
+The coder generates workspace file changes (patch artifacts) or patch-based diffs depending on the task and enforces constraints. It can include repo context for patch tasks and parse JSON outputs into CodePatch objects and optional execution requests. (Source: llamia_v3_2/nodes/coder.py)
+
+Executor & critic
+The executor runs an allowlisted set of commands (with safety filters) and saves results into state; the critic decides whether to continue, fix, or request web research, using loop limits to avoid infinite retries. (Sources: llamia_v3_2/nodes/executor.py, llamia_v3_2/tools/exec_tools.py, llamia_v3_2/nodes/critic.py)
+
+Research & web
+Repo research uses a local RAG pipeline (Chroma + LlamaIndex + Ollama) to index/query the repo; web research uses SearXNG via HTTPX. (Sources: llamia_v3_2/tools/rag_index.py, llamia_v3_2/nodes/research.py, llamia_v3_2/nodes/research_web.py)
+
+Chat surface
+Chat provides deterministic summaries for task results, repo research results, or web results, and otherwise routes to an LLM with a guard prompt. It also avoids duplicate responses per turn. (Source: llamia_v3_2/nodes/chat.py)
+
+Configuration
+DEFAULT_CONFIG is tuned for a local OpenAI-compatible server (e.g., Ollama) and SearXNG, with explicit model names and URLs. (Source: llamia_v3_2/config.py)
+
+Key dependencies & services
+LLM calls via OpenAI-compatible API (default assumes local Ollama at http://127.0.0.1:11434/v1). (Source: llamia_v3_2/config.py)
+
+RAG indexing uses ChromaDB + LlamaIndex with Ollama embeddings/LLM. (Source: llamia_v3_2/tools/rag_index.py)
+
+Web search uses SearXNG at http://127.0.0.1:8088. (Source: llamia_v3_2/config.py, llamia_v3_2/nodes/research_web.py)
+
+Potential Issues / Risks
+graph_improved.py appears unused in the REPL path
+The REPL imports build_llamia_graph from llamia_v3_2.graph, not graph_improved. This suggests graph_improved.py might be stale or experimental, potentially causing confusion about which routing logic is active. (Sources: llamia_v3_2/repl/app.py, llamia_v3_2/graph.py, llamia_v3_2/graph_improved.py)
+
+LLM client provider selection is tied to DEFAULT_CONFIG.chat_model
+_make_client() chooses the provider based on DEFAULT_CONFIG.chat_model.provider, even when other roles (planner/coder/research) might specify different providers. This could lead to mismatched provider behavior if role-specific configs are set to a different provider. (Source: llamia_v3_2/llm_client.py, llamia_v3_2/config.py)
+
+Hard dependency on local services (Ollama/SearXNG) with fixed URLs
+The defaults assume local services are running. If they are not, planner may fail to call models, RAG ingestion may fail, and web search will error. There’s no fallback strategy beyond logging errors and injecting error messages into the state. (Sources: llamia_v3_2/config.py, llamia_v3_2/llm_client.py, llamia_v3_2/tools/rag_index.py, llamia_v3_2/nodes/research_web.py)
+
+Safety filter allows only a narrow command set
+The executor allowlist blocks most commands and disallows shell metacharacter tokens. This is great for safety, but may be too restrictive for some workflows (e.g., common build tools). It may cause repeated failures in task mode if the coder suggests commands outside the allowlist. (Source: llamia_v3_2/tools/exec_tools.py)
+
+Duplicate / potentially dead code in fs_tools.py
+There are two different path-normalization helpers (_safe_workspace_path and _normalize_path), but only _normalize_path appears to be used. The unused helper increases maintenance surface and could cause confusion about intended path safety rules. (Source: llamia_v3_2/tools/fs_tools.py)
+
+Potential Next Steps
+Clarify the active graph implementation
+Decide whether graph_improved.py is the intended workflow. If yes, update the REPL to import it; if not, consider removing or documenting it to avoid ambiguity. (Sources: llamia_v3_2/repl/app.py, llamia_v3_2/graph.py, llamia_v3_2/graph_improved.py)
+
+Make LLM provider selection role-aware
+Update llm_client to select provider based on the model config passed to chat_completion, not always DEFAULT_CONFIG.chat_model. This would enable mixing providers per role. (Sources: llamia_v3_2/llm_client.py, llamia_v3_2/config.py)
+
+Add configuration overrides / detection for external services
+Provide environment variable overrides or startup checks for Ollama/SearXNG URLs and availability, and produce clearer user-facing guidance when those services are unavailable. (Sources: llamia_v3_2/config.py, llamia_v3_2/nodes/research_web.py, llamia_v3_2/tools/rag_index.py)
+
+Review executor allowlist for practical workflows
+Expand the allowlist cautiously or allow a configurable allowlist, while retaining security checks, to reduce task failures due to blocked commands. (Source: llamia_v3_2/tools/exec_tools.py)
+
+Remove or consolidate unused helpers
+If _safe_workspace_path is not needed, remove it or replace _normalize_path with it to avoid confusion and ensure consistent path validation. (Source: llamia_v3_2/tools/fs_tools.py)
