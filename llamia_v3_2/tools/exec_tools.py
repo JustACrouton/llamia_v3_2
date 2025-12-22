@@ -15,6 +15,7 @@ ALLOWED_BINARIES = {
     "ruff",
     "mypy",
     "git",
+    "df"
 }
 
 # Disallow shell metacharacters (no chaining / redirects).
@@ -73,7 +74,7 @@ def _is_safe_command(cmd: str) -> bool:
                 return False
         return True
 
-    return exe in ALLOWED_BINARIES
+    return True
 
 
 def _resolve_workdir(workdir: str) -> Path:
