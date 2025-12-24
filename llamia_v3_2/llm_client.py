@@ -9,52 +9,75 @@ from openai import OpenAI, APIError, APITimeoutError
 from .config import DEFAULT_CONFIG, ModelConfig
 from .state import Message
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
-def _make_client() -> OpenAI:
+# Cache clients by (provider, base_url, api_key_env) so planner/coder can use Chutes
+# while chat/research/critic stay local, etc.
+_client_cache: dict[tuple[str, str | None, str], OpenAI] = {}
+
+
+def _resolve_provider(model_cfg: ModelConfig) -> str:
+    # ModelConfig.provider is Literal["openai","openai_compatible"], but keep it robust.
+    return getattr(model_cfg, "provider", DEFAULT_CONFIG.chat_model.provider)
+
+
+def _resolve_base_url(model_cfg: ModelConfig) -> str | None:
+    # Prefer per-model override if present, else global config default
+    base = getattr(model_cfg, "api_base", None) or DEFAULT_CONFIG.api_base
+
+    # Defensive: avoid accidental /v1/v1
+    if base and base.endswith("/v1/v1"):
+        base = base[:-3]
+    return base
+
+
+def _resolve_api_key_env(model_cfg: ModelConfig) -> str:
+    # Prefer per-model override if present, else global config default
+    return getattr(model_cfg, "api_key_env", None) or DEFAULT_CONFIG.api_key_env
+
+
+def _make_client_for(model_cfg: ModelConfig) -> OpenAI:
     """
-    Build an OpenAI / OpenAI-compatible client using DEFAULT_CONFIG.
-    - For provider='openai': requires a real API key, uses OpenAI's base URL.
-    - For provider='openai_compatible': uses api_base and allows a dummy key.
+    Build an OpenAI / OpenAI-compatible client for a specific model_cfg.
+    - provider='openai': requires a real API key, base_url optional.
+    - provider='openai_compatible': requires base_url, dummy key allowed if empty.
     """
-    cfg = DEFAULT_CONFIG
-    base_url = cfg.api_base
-    provider = cfg.chat_model.provider
-    api_key = os.getenv(cfg.api_key_env, "")
+    provider = _resolve_provider(model_cfg)
+    base_url = _resolve_base_url(model_cfg)
+    api_key_env = _resolve_api_key_env(model_cfg)
+    api_key = os.getenv(api_key_env, "")
 
     if provider == "openai":
         if not api_key:
             raise RuntimeError(
-                f"Missing API key: env var {cfg.api_key_env} is not set for provider 'openai'."
+                f"Missing API key: env var {api_key_env} is not set for provider 'openai'."
             )
-        # Let the OpenAI client use its default base URL if none specified
-        if base_url:
-            return OpenAI(api_key=api_key, base_url=base_url)
-        else:
-            return OpenAI(api_key=api_key)
+        # Let OpenAI client use default base URL if none specified
+        return OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
 
     # provider == "openai_compatible"
     if not base_url:
-        raise RuntimeError(
-            "provider 'openai_compatible' requires api_base to be set in config.py"
-        )
+        raise RuntimeError("provider 'openai_compatible' requires api_base to be set (global or per-model).")
 
-    # Many OpenAI-compatible servers (like Ollama) ignore the key, but the client requires it.
+    # Many OpenAI-compatible servers (like Ollama) ignore the key, but the OpenAI client requires one.
     if not api_key:
         api_key = "dummy"
 
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
-_client: OpenAI | None = None
+def get_client(model_cfg: ModelConfig) -> OpenAI:
+    provider = _resolve_provider(model_cfg)
+    base_url = _resolve_base_url(model_cfg)
+    api_key_env = _resolve_api_key_env(model_cfg)
 
-
-def get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = _make_client()
-    return _client
+    key = (provider, base_url, api_key_env)
+    client = _client_cache.get(key)
+    if client is None:
+        client = _make_client_for(model_cfg)
+        _client_cache[key] = client
+        logger.info(f"[llm_client] created client provider={provider} base_url={base_url} key_env={api_key_env}")
+    return client
 
 
 def chat_completion(
@@ -62,17 +85,13 @@ def chat_completion(
     model_cfg: ModelConfig | None = None,
 ) -> str:
     """
-    Simple wrapper to do a chat completion using the given model config
-    (or DEFAULT_CONFIG.chat_model if none provided).
+    Chat completion using the given model config (or DEFAULT_CONFIG.chat_model if none).
+    IMPORTANT: client is chosen per-model_cfg so roles can route to different backends.
     """
     cfg = model_cfg or DEFAULT_CONFIG.chat_model
-    client = get_client()
+    client = get_client(cfg)
 
-    # Strip node info before sending to the API
-    api_messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in messages
-    ]
+    api_messages = [{"role": m["role"], "content": m["content"]} for m in messages]
 
     try:
         resp = client.chat.completions.create(
@@ -81,9 +100,7 @@ def chat_completion(
             temperature=cfg.temperature,
             max_tokens=cfg.max_output_tokens,
         )
-        
-        content = resp.choices[0].message.content or ""
-        return content
+        return resp.choices[0].message.content or ""
     except APITimeoutError as e:
         logger.error(f"API timeout error: {e}")
         return "Error: Request to LLM timed out. Please try again."

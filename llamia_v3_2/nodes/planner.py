@@ -140,31 +140,31 @@ def _retry_strict_json(messages: list[dict[str, str]], model_cfg) -> str:
     return chat_completion(messages=retry_msgs, model_cfg=model_cfg)
 
 
+
 def _analyze_goal_complexity(goal: str) -> str:
-    """Analyze the goal to determine appropriate planning strategy."""
-    goal_lower = goal.lower()
+    """Analyze the goal and return complexity level using an LLM."""
+    from llamia_v3_2.llm_client import chat_completion, DEFAULT_CONFIG
     
-    # Multi-domain goals that need careful planning
-    if any(keyword in goal_lower for keyword in [
-        "refactor", "migrate", "update dependencies", "security audit", 
-        "performance optimization", "debug complex", "fix multiple"
-    ]):
-        return "complex"
+    prompt = (
+        "You are an expert at analyzing task complexity. ",
+        "Classify the following task into one of these categories: simple, complex, development.",
+        "Simple: tasks that can be completed in 1-2 steps with minimal dependencies.",
+        "Complex: tasks requiring multiple steps, coordination, or research.",
+        "Development: tasks that involve writing or modifying code, including testing.",
+        f"Task: {goal}",
+        "Reason step by step, then output only the category (simple, complex, development)."
+    )
     
-    # Simple, direct commands
-    elif any(keyword in goal_lower for keyword in [
-        "check", "list", "show", "display", "find file", "search file",
-        "what is", "where is", "how much", "how many"
-    ]):
-        return "simple"
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        model_cfg=DEFAULT_CONFIG.model_for("planner"),
+    ).strip().lower()
     
-    # Development tasks
-    elif any(keyword in goal_lower for keyword in [
-        "add", "create", "implement", "write", "build", "test", "deploy"
-    ]):
-        return "development"
-    
-    return "standard"
+    pass
+    if response not in ['simple', 'complex', 'development']:
+        return 'complex'
+    return response
+
 
 
 def _enhance_plan_with_context(plan_steps: list[dict], goal: str, research_notes: str = "") -> list[PlanStep]:
