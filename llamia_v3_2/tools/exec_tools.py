@@ -37,44 +37,50 @@ def _special_case_git_diff_redirect(cmd: str) -> Path | None:
     return None
 
 
-def _is_safe_command(cmd: str) -> bool:
+def _is_safe_command(cmd: str) -> tuple[bool, str]:
     c = cmd.strip()
     if not c:
-        return False
+        return False, "Blocked by safety filter: empty command."
 
     try:
         parts = shlex.split(c)
     except Exception:
-        return False
+        return False, "Blocked by safety filter: failed to parse command."
 
     if not parts:
-        return False
+        return False, "Blocked by safety filter: empty command."
 
     # Block shell operators only when they are separate argv tokens.
     # This prevents "python -c ... | cat" etc, while allowing semicolons inside python -c strings.
     if any(p in DISALLOWED_ARG_TOKENS for p in parts):
-        return False
+        return False, "Blocked by safety filter: shell metacharacters are not allowed."
 
     exe = parts[0]
+
+    if exe != "git" and exe not in ALLOWED_BINARIES:
+        return (
+            False,
+            f"Blocked by safety filter: '{exe}' is not in ALLOWED_BINARIES.",
+        )
 
     # Extra safety for git: allow only read-only-ish commands + apply --check
     if exe == "git":
         if len(parts) < 2:
-            return False
+            return False, "Blocked by safety filter: git subcommand is required."
         sub = parts[1]
         allowed_sub = {"status", "diff", "ls-files", "apply"}
         if sub not in allowed_sub:
-            return False
+            return False, f"Blocked by safety filter: git {sub} is not allowed."
         if sub == "apply":
             # Only allow dry-run validation; never apply changes here.
             if "--check" not in parts:
-                return False
+                return False, "Blocked by safety filter: git apply requires --check."
             # Disallow flags that can write reject files or bypass path safety.
             if any(f in parts for f in ["--reject", "--unsafe-paths"]):
-                return False
-        return True
+                return False, "Blocked by safety filter: git apply flags are restricted."
+        return True, ""
 
-    return True
+    return True, ""
 
 
 def _resolve_workdir(workdir: str) -> Path:
@@ -165,13 +171,14 @@ def run_exec_request(req: ExecRequest) -> list[ExecResult]:
         if prev_cmd is not None and prev_rc == 0 and _is_python_fallback(prev_cmd, cmd):
             continue
 
-        if not _is_safe_command(cmd):
+        is_safe, error_message = _is_safe_command(cmd)
+        if not is_safe:
             results.append(
                 ExecResult(
                     command=cmd,
                     returncode=126,
                     stdout="",
-                    stderr="Blocked by safety filter (disallowed command or shell metacharacters).",
+                    stderr=error_message,
                 )
             )
             prev_cmd, prev_rc = cmd, 126

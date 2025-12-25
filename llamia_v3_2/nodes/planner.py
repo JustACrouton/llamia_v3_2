@@ -167,8 +167,8 @@ def _analyze_goal_complexity(goal: str) -> str:
 
 
 
-def _enhance_plan_with_context(plan_steps: list[dict], goal: str, research_notes: str = "") -> list[PlanStep]:
-    """Enhance the plan with additional context and validation."""
+def _enhance_plan_with_context(plan_steps: list[dict]) -> list[PlanStep]:
+    """Normalize plan steps from the planner output."""
     enhanced_steps = []
     
     for i, step in enumerate(plan_steps):
@@ -181,7 +181,7 @@ def _enhance_plan_with_context(plan_steps: list[dict], goal: str, research_notes
             
         sid = int(step.get("id", i + 1))
         
-        # Create PlanStep with only the original expected fields
+        # Keep this focused on normalization; goal/notes are handled in the prompt.
         enhanced_steps.append(PlanStep(
             id=sid, 
             description=desc, 
@@ -219,13 +219,6 @@ def planner_node(state: LlamiaState) -> LlamiaState:
     notes = (state.research_notes or "").strip()
     notes_block = f"\n\nWeb research notes:\n{notes}\n" if notes else ""
     
-    # Add context about current directory/file context if available
-    context_block = ""
-    if hasattr(state, 'current_file') and state.current_file:
-        context_block += f"\nCurrent file context: {state.current_file}\n"
-    if hasattr(state, 'working_dir') and state.working_dir:
-        context_block += f"Current working directory: {state.working_dir}\n"
-
     # Determine planning strategy based on goal complexity
     complexity = _analyze_goal_complexity(state.goal)
     
@@ -240,7 +233,8 @@ def planner_node(state: LlamiaState) -> LlamiaState:
 
     messages = [
         {"role": "system", "content": prompt, "node": NODE_NAME},
-        {"role": "user", "content": f"Goal: {state.goal}{context_block}{notes_block}", "node": NODE_NAME},
+        # Keep the user prompt minimal; only goal and research notes are injected.
+        {"role": "user", "content": f"Goal: {state.goal}{notes_block}", "node": NODE_NAME},
     ]
 
     cfg = DEFAULT_CONFIG.model_for("planner")
@@ -265,7 +259,7 @@ def planner_node(state: LlamiaState) -> LlamiaState:
             raise ValueError("plan field is not a list")
 
         # Enhance the plan with context and validation
-        enhanced_plan = _enhance_plan_with_context(raw_plan, state.goal, notes)
+        enhanced_plan = _enhance_plan_with_context(raw_plan)
         plan_steps = enhanced_plan
 
         if not plan_steps:
