@@ -205,6 +205,7 @@ def planner_node(state: LlamiaState) -> LlamiaState:
         and _needs_web_search(state.goal)
     ):
         state.research_query = state.goal.strip()
+        state.return_after_web = "planner"
         state.next_agent = "research_web"
         state.add_message(
             "system",

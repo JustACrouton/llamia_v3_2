@@ -1,0 +1,74 @@
+--- llamia_v3_2/state_improved.py
++++ llamia_v3_2/state_improved.py
+@@ -43,65 +43,71 @@ class ExecRequest:
+ class ExecResult:
+     command: str
+     returncode: int
+     stdout: str
+     stderr: str
+ 
+ 
+ @dataclass
+ class LlamiaState:
+     """
+     Core shared state for Llamia v3.2.
+ 
+     This state is intentionally "plain" so LangGraph can serialize it to dicts and back.
+     """
+     messages: list[Message] = field(default_factory=list)
+ 
+ 
+     turn_id: int = 0
+     responded_turn_id: int = -1
+     
+     
+     # High-level mode
+     mode: Literal["chat", "task"] = "chat"
+     goal: str | None = None
+ 
++    # Intent classification (set by intent_classifier, consumed by intent_router)
++    intent_kind: Literal["chat", "task", "research", "research_web"] | None = None
++    intent_payload: str | None = None
++    intent_source: str | None = None
++
+     # Task plan
+     plan: list[PlanStep] = field(default_factory=list)
+ 
+     # Code patches
+     pending_patches: list[CodePatch] = field(default_factory=list)
+     applied_patches: list[CodePatch] = field(default_factory=list)
+ 
+     # Local research / RAG
+     research_query: str | None = None
+     research_notes: str | None = None
+ 
+     # Web search / research_web node
+     web_queue: list[str] = field(default_factory=list)   # pending web queries
+     web_results: str | None = None                       # last web results summary
+     return_after_web: str = "planner"                    # where to go when web finishes
++    return_after_research: str = "planner"               # where to go when repo research finishes
+ 
+ 
+     # Critic web-search throttle (resets per task)
+     web_search_count: int = 0
+ 
+     # Execution request (suggested commands)
+     exec_request: ExecRequest | None = None
+ 
+     # Full history of execution results (across loops)
+     exec_results: list[ExecResult] = field(default_factory=list)
+ 
+     # Latest execution results (from the most recent executor run only)
+     last_exec_results: list[ExecResult] = field(default_factory=list)
+ 
+     # Routing / control
+     next_agent: str | None = None
+     loop_count: int = 0
+ 
+     # Critic -> Coder guidance
+     fix_instructions: str | None = None
+ 
+     # If task is intentionally demonstrating a failure (don’t “auto-fix”)
+     expected_failure: bool = False
+ 
+     # Debugging trace

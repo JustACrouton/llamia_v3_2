@@ -8,100 +8,6 @@ from ..state import LlamiaState
 NODE_NAME = "intent_router"
 
 
-def _strip_repl_prefix(text: str) -> str:
-    """
-    Users sometimes paste prompts like: 'you> task: ...'
-    Strip any leading 'you>' tokens so routing behaves consistently.
-    """
-    s = (text or "").strip()
-    while s.lower().startswith("you>"):
-        s = s[4:].lstrip()
-    return s
-
-
-def _extract_task_goal(raw: str) -> str:
-    text = _strip_repl_prefix(raw).strip()
-    lower = text.lower()
-    if lower.startswith("task:"):
-        return text[5:].strip() or "(unspecified task goal)"
-    if lower.startswith("task "):
-        return text[5:].strip() or "(unspecified task goal)"
-    return text
-
-
-def _looks_like_task(raw: str) -> bool:
-    lower = _strip_repl_prefix(raw).strip().lower()
-
-    if lower in {"hi", "hey", "hello", "yo", "sup"}:
-        return False
-
-    verb_keywords = [
-        "write a ",
-        "write an ",
-        "write the ",
-        "write some code",
-        "write code",
-        "write a script",
-        "build a ",
-        "build an ",
-        "build the ",
-        "create a ",
-        "create an ",
-        "generate code",
-        "implement ",
-        "make a script",
-        "make a program",
-        "fix this code",
-        "fix the code",
-        "refactor this",
-    ]
-
-    object_keywords = [
-        "script",
-        "program",
-        "function",
-        "module",
-        "tool",
-        "bot",
-        "cli",
-        "python script",
-        "python program",
-    ]
-
-    if any(kw in lower for kw in verb_keywords):
-        return True
-
-    if "python" in lower and any(obj in lower for obj in object_keywords):
-        return True
-
-    return False
-
-
-def _looks_like_web_search(text: str) -> bool:
-    t = _strip_repl_prefix(text).strip().lower()
-    return t.startswith("web:") or t.startswith("search:")
-
-
-def _extract_web_query(text: str) -> str:
-    t = _strip_repl_prefix(text).strip()
-    lower = t.lower()
-    if lower.startswith("web:"):
-        return t.split(":", 1)[1].strip()
-    if lower.startswith("search:"):
-        return t.split(":", 1)[1].strip()
-    return t
-
-
-def _looks_like_repo_research(text: str) -> bool:
-    t = _strip_repl_prefix(text).strip().lower()
-    return t.startswith("research:") or t.startswith("reindex:")
-
-
-def _extract_repo_research_query(text: str) -> str:
-    # Keep the prefix for research_node to parse reindex:/research:
-    return _strip_repl_prefix(text).strip()
-
-
 def intent_router_node(state: LlamiaState) -> LlamiaState:
     state.log(f"[{NODE_NAME}] starting")
 
@@ -127,11 +33,16 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     if not getattr(state, "messages", None):
         state.mode = "chat"
         state.goal = None
+        state.intent_kind = "chat"
+        state.intent_payload = None
+        state.intent_source = "empty"
         state.research_query = None
         state.research_notes = None
         state.web_results = None
         state.web_queue = []
         state.web_search_count = 0
+        state.return_after_web = "chat"
+        state.return_after_research = "chat"
         state.loop_count = 0
         state.fix_instructions = None
         state.next_agent = "chat"
@@ -158,12 +69,14 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         _trace("route", kind="chat", next_agent="chat")
         return state
 
-    text = _strip_repl_prefix(str(last.get("content", "") or ""))
-    lower = text.lower().strip()
+    intent = getattr(state, "intent_kind", None)
+    payload = getattr(state, "intent_payload", None)
 
     # 0) Explicit web search (highest priority)
-    if _looks_like_web_search(text):
-        q = _extract_web_query(text)
+    if intent == "research_web":
+        q = str(payload or "").strip()
+        if not q:
+            q = str(last.get("content", "") or "").strip()
         state.mode = "chat"
         state.goal = None
         state.research_query = q
@@ -171,6 +84,8 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         state.web_results = None
         state.web_queue = []
         state.web_search_count = 0
+        state.return_after_web = "chat"
+        state.return_after_research = "chat"
         state.fix_instructions = None
         state.next_agent = "research_web"
         state.log(f"[{NODE_NAME}] WEB: next_agent=research_web query={q!r}")
@@ -178,8 +93,10 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         return state
 
     # 0.5) Explicit repo research (RAG)
-    if _looks_like_repo_research(text):
-        q = _extract_repo_research_query(text)
+    if intent == "research":
+        q = str(payload or "").strip()
+        if not q:
+            q = str(last.get("content", "") or "").strip()
         state.mode = "chat"
         state.goal = None
         state.research_query = q
@@ -187,6 +104,8 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
         state.web_results = None
         state.web_queue = []
         state.web_search_count = 0
+        state.return_after_web = "chat"
+        state.return_after_research = "chat"
         state.loop_count = 0
         state.fix_instructions = None
         state.next_agent = "research"
@@ -198,34 +117,21 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     state.research_query = None
 
     # 1) Explicit task
-    if lower.startswith("task:") or lower.startswith("task "):
-        goal = _extract_task_goal(text)
+    if intent == "task":
+        goal = str(payload or "").strip() or "(unspecified task goal)"
         state.mode = "task"
         state.goal = goal
         state.research_notes = None
         state.web_results = None
         state.web_queue = []
         state.web_search_count = 0
+        state.return_after_web = "planner"
+        state.return_after_research = "planner"
         state.loop_count = 0
         state.fix_instructions = None
         state.next_agent = "planner"
         state.log(f"[{NODE_NAME}] TASK: mode=task goal={goal!r}")
         _trace("route", kind="task", goal=goal, next_agent="planner")
-        return state
-
-    # 2) Heuristic task
-    if _looks_like_task(text):
-        state.mode = "task"
-        state.goal = text
-        state.research_notes = None
-        state.web_results = None
-        state.web_queue = []
-        state.web_search_count = 0
-        state.loop_count = 0
-        state.fix_instructions = None
-        state.next_agent = "planner"
-        state.log(f"[{NODE_NAME}] TASK(heur): mode=task goal={text!r}")
-        _trace("route", kind="task_heur", goal=text, next_agent="planner")
         return state
 
     # 3) Default chat
@@ -235,6 +141,8 @@ def intent_router_node(state: LlamiaState) -> LlamiaState:
     state.web_results = None
     state.web_queue = []
     state.web_search_count = 0
+    state.return_after_web = "chat"
+    state.return_after_research = "chat"
     state.loop_count = 0
     state.fix_instructions = None
     state.next_agent = "chat"

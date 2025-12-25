@@ -163,6 +163,7 @@ def critic_node(state: LlamiaState) -> LlamiaState:
                 f"Stderr (tail):\n{tail}\n"
             )
 
+            state.return_after_web = "coder"
             state.next_agent = "research_web"
             state.add_message(
                 "system",
@@ -195,4 +196,3 @@ def critic_node(state: LlamiaState) -> LlamiaState:
     state.add_message("system", "[critic] execution ok -> finishing", node=NODE_NAME)
     state.log(f"[{NODE_NAME}] done (success)")
     return state
-

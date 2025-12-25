@@ -24,12 +24,16 @@ def _reset_turn_fields(state: LlamiaState) -> None:
     Normalize/reset per-turn fields to a known state.
     """
     state.responded_turn_id = -1
+    state.intent_kind = None
+    state.intent_payload = None
+    state.intent_source = None
     state.web_search_count = 0
     state.web_results = None
     state.research_query = None
     state.research_notes = None
     state.web_queue = []
     state.return_after_web = "planner"
+    state.return_after_research = "planner"
     state.loop_count = 0
 
 
@@ -41,6 +45,14 @@ def _ensure_turn_fields_exist(state: LlamiaState) -> None:
         state.turn_id = 0
     if not hasattr(state, "responded_turn_id"):
         state.responded_turn_id = -1
+    if not hasattr(state, "intent_kind"):
+        state.intent_kind = None
+    if not hasattr(state, "intent_payload"):
+        state.intent_payload = None
+    if not hasattr(state, "intent_source"):
+        state.intent_source = None
+    if not hasattr(state, "return_after_research"):
+        state.return_after_research = "planner"
 
 
 def run_repl(config: Optional[ReplConfig] = None) -> int:

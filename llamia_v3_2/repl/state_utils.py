@@ -41,6 +41,9 @@ def state_snapshot(state: LlamiaState) -> Dict[str, Any]:
     return {
         "mode": getattr(state, "mode", None),
         "goal": getattr(state, "goal", None),
+        "intent_kind": getattr(state, "intent_kind", None),
+        "intent_payload": getattr(state, "intent_payload", None),
+        "intent_source": getattr(state, "intent_source", None),
         "next_agent": getattr(state, "next_agent", None),
         "loop_count": getattr(state, "loop_count", None),
         "web_search_count": getattr(state, "web_search_count", None),
@@ -146,6 +149,7 @@ def coerce_to_state(raw: Any) -> LlamiaState:
         web_queue = [str(q).strip() for q in web_queue if str(q).strip()]
 
         return_after_web = str(raw.get("return_after_web", "planner") or "planner").strip() or "planner"
+        return_after_research = str(raw.get("return_after_research", "planner") or "planner").strip() or "planner"
 
         turn_id = int(raw.get("turn_id", 0) or 0)
         responded_turn_id = int(raw.get("responded_turn_id", -1) or -1)
@@ -170,7 +174,11 @@ def coerce_to_state(raw: Any) -> LlamiaState:
             web_queue=web_queue,
             web_results=raw.get("web_results"),
             return_after_web=return_after_web,
+            return_after_research=return_after_research,
             web_search_count=int(raw.get("web_search_count", 0) or 0),
+            intent_kind=raw.get("intent_kind"),
+            intent_payload=raw.get("intent_payload"),
+            intent_source=raw.get("intent_source"),
             turn_id=turn_id,
             responded_turn_id=responded_turn_id,
         )

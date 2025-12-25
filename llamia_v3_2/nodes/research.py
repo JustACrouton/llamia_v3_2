@@ -47,5 +47,9 @@ def research_node(state: LlamiaState) -> LlamiaState:
         node=NODE_NAME,
     )
 
+    target = str(getattr(state, "return_after_research", "") or "").strip()
+    if target not in {"planner", "coder", "chat", "research"}:
+        target = "planner" if state.mode == "task" else "chat"
+    state.next_agent = target
     state.log(f"[{NODE_NAME}] done")
     return state

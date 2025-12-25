@@ -44,12 +44,12 @@ def test_routing_error_handling():
         
         # Test research_web routing with None state
         result = _route_from_research_web(None)
-        assert result == "chat", f"Expected 'chat' but got {result}"
+        assert result == "executor", f"Expected 'executor' but got {result}"
         print("✓ Research web router handles None state correctly")
         
         # Test coder routing with None state
         result = _route_from_coder(None)
-        assert result == "chat", f"Expected 'chat' but got {result}"
+        assert result == "executor", f"Expected 'executor' but got {result}"
         print("✓ Coder router handles None state correctly")
         
         # Test critic routing with None state

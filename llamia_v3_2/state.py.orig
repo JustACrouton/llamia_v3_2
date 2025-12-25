@@ -2,16 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, TypedDict
-import logging
 
-# Set up logging
-logger = logging.getLogger(__name__)
-
-# Configuration for state management
-MAX_MESSAGES = 100
-MAX_TRACE_ENTRIES = 1000
-MAX_EXEC_RESULTS = 100
-MAX_PATCHES = 50
 
 class Message(TypedDict):
     role: Literal["user", "assistant", "system"]
@@ -65,12 +56,6 @@ class LlamiaState:
     mode: Literal["chat", "task"] = "chat"
     goal: str | None = None
 
-    # Intent classification (set by intent_classifier, consumed by intent_router)
-    intent_kind: Literal["chat", "task", "research", "research_web"] | None = None
-    intent_payload: str | None = None
-    intent_source: str | None = None
-
-
     # Task plan
     plan: list[PlanStep] = field(default_factory=list)
 
@@ -86,7 +71,6 @@ class LlamiaState:
     web_queue: list[str] = field(default_factory=list)   # pending web queries
     web_results: str | None = None                       # last web results summary
     return_after_web: str = "planner"                    # where to go when web finishes
-    return_after_research: str = "planner"               # where to go when repo research finishes
 
 
     # Critic web-search throttle (resets per task)
@@ -121,31 +105,9 @@ class LlamiaState:
         node: str | None = None,
     ) -> None:
         self.messages.append({"role": role, "content": content, "node": node})
-        # Limit the number of messages to prevent memory issues
-        if len(self.messages) > MAX_MESSAGES:
-            self.messages = self.messages[-MAX_MESSAGES:]
-            logger.warning("Message list truncated to prevent memory issues")
 
     def log(self, text: str) -> None:
         self.trace.append(text)
-        # Limit the number of trace entries to prevent memory issues
-        if len(self.trace) > MAX_TRACE_ENTRIES:
-            self.trace = self.trace[-MAX_TRACE_ENTRIES:]
-            logger.warning("Trace list truncated to prevent memory issues")
-
-    def add_exec_result(self, result: ExecResult) -> None:
-        self.exec_results.append(result)
-        # Limit the number of execution results to prevent memory issues
-        if len(self.exec_results) > MAX_EXEC_RESULTS:
-            self.exec_results = self.exec_results[-MAX_EXEC_RESULTS:]
-            logger.warning("Execution results list truncated to prevent memory issues")
-
-    def add_applied_patch(self, patch: CodePatch) -> None:
-        self.applied_patches.append(patch)
-        # Limit the number of patches to prevent memory issues
-        if len(self.applied_patches) > MAX_PATCHES:
-            self.applied_patches = self.applied_patches[-MAX_PATCHES:]
-            logger.warning("Applied patches list truncated to prevent memory issues")
 
 
 # Alias used by LangGraph

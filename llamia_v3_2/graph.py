@@ -6,6 +6,7 @@ from typing import Any, Callable
 from langgraph.graph import StateGraph, END
 
 from .state import LlamiaGraphState
+from .nodes.intent_classifier import intent_classifier_node
 from .nodes.intent_router import intent_router_node
 from .nodes.chat import chat_node
 from .nodes.planner import planner_node
@@ -140,34 +141,15 @@ def _get_mode_and_goal(state: Any) -> tuple[str, str | None]:
     return "chat", None
 
 
-def _latest_user_text(state: Any) -> str:
-    msgs = _get_attr(state, "messages", []) or []
-    if not isinstance(msgs, list):
-        return ""
-    for m in reversed(msgs):
-        if isinstance(m, dict) and m.get("role") == "user":
-            return str(m.get("content", "")).strip()
-    return ""
-
-
-def _looks_like_research(user_text: str) -> bool:
-    t = user_text.lower().strip()
-    if t.startswith("research:") or t.startswith("reindex:"):
-        return True
-    keywords = ["workspace", "repo", "repository", "project files", "codebase", "in this folder"]
-    intents = ["what files", "list files", "show files", "summarize files", "what does this do", "explain this project"]
-    return any(k in t for k in keywords) and any(i in t for i in intents)
-
-
 def _route_from_intent(state: Any) -> str:
     nxt = _get_attr(state, "next_agent", None)
     allowed = {"chat", "planner", "research", "research_web"}
     if isinstance(nxt, str) and nxt in allowed:
         return nxt
 
-    user_text = _latest_user_text(state)
-    if _looks_like_research(user_text):
-        return "research"
+    intent = _get_attr(state, "intent_kind", None)
+    if isinstance(intent, str) and intent in allowed:
+        return intent
 
     mode, goal = _get_mode_and_goal(state)
     if mode == "task" and goal:
@@ -191,6 +173,15 @@ def _route_from_planner(state: Any) -> str:
 
 
 def _route_from_research(state: Any) -> str:
+    nxt = _get_attr(state, "next_agent", None)
+    allowed = {"planner", "coder", "chat", "research"}
+    if isinstance(nxt, str) and nxt in allowed:
+        return nxt
+
+    return_after = _get_attr(state, "return_after_research", None)
+    if isinstance(return_after, str) and return_after in allowed:
+        return return_after
+
     mode, goal = _get_mode_and_goal(state)
     if mode == "task" and goal:
         return "planner"
@@ -198,6 +189,15 @@ def _route_from_research(state: Any) -> str:
 
 
 def _route_from_research_web(state: Any) -> str:
+    nxt = _get_attr(state, "next_agent", None)
+    allowed = {"coder", "planner", "chat", "research_web"}
+    if isinstance(nxt, str) and nxt in allowed:
+        return nxt
+
+    return_after = _get_attr(state, "return_after_web", None)
+    if isinstance(return_after, str) and return_after in allowed:
+        return return_after
+
     mode, goal = _get_mode_and_goal(state)
     if mode != "task" or not goal:
         return "chat"
@@ -228,6 +228,7 @@ def build_llamia_graph():
     workflow = StateGraph(LlamiaGraphState)
 
     # Wrap nodes (enter/exit)
+    workflow.add_node("intent_classifier", _wrap_step("intent_classifier", intent_classifier_node))
     workflow.add_node("intent_router", _wrap_step("intent_router", intent_router_node))
     workflow.add_node("research", _wrap_step("research", research_node))
     workflow.add_node("research_web", _wrap_step("research_web", research_web_node))
@@ -237,7 +238,8 @@ def build_llamia_graph():
     workflow.add_node("critic", _wrap_step("critic", critic_node))
     workflow.add_node("chat", _wrap_step("chat", chat_node))
 
-    workflow.set_entry_point("intent_router")
+    workflow.set_entry_point("intent_classifier")
+    workflow.add_edge("intent_classifier", "intent_router")
 
     # intent_router -> {research_web, research, planner, chat}
     workflow.add_conditional_edges(
@@ -246,18 +248,18 @@ def build_llamia_graph():
         {"research_web": "research_web", "research": "research", "planner": "planner", "chat": "chat"},
     )
 
-    # research -> {planner, chat}
+    # research -> {planner, coder, research, chat}
     workflow.add_conditional_edges(
         "research",
         _wrap_router("research", _route_from_research),
-        {"planner": "planner", "chat": "chat"},
+        {"planner": "planner", "coder": "coder", "research": "research", "chat": "chat"},
     )
 
-    # research_web -> {coder, planner, chat}
+    # research_web -> {coder, planner, research_web, chat}
     workflow.add_conditional_edges(
         "research_web",
         _wrap_router("research_web", _route_from_research_web),
-        {"coder": "coder", "planner": "planner", "chat": "chat"},
+        {"coder": "coder", "planner": "planner", "research_web": "research_web", "chat": "chat"},
     )
 
     # planner -> {research_web, research, coder}  (FIXED: include research)
@@ -286,4 +288,3 @@ def build_llamia_graph():
 
     workflow.add_edge("chat", END)
     return workflow.compile()
-
