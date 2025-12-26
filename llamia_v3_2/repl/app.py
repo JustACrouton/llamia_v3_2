@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+REPL (Read-Eval-Print Loop) Application Core
+
+This module contains:
+- The main interactive loop (run_repl)
+- Turn state management functions
+- Core REPL lifecycle logic
+
+Key Components:
+- _reset_turn_fields: Prepares state between turns
+- _ensure_turn_fields_exist: Backwards compatibility
+- run_repl: Main execution entry point
+"""
+
 from collections import Counter
 import sys
 import time
@@ -35,6 +49,7 @@ def _reset_turn_fields(state: LlamiaState) -> None:
     state.return_after_web = "planner"
     state.return_after_research = "planner"
     state.loop_count = 0
+    state.mode = None
 
 
 def _ensure_turn_fields_exist(state: LlamiaState) -> None:

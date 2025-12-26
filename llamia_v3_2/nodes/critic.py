@@ -1,5 +1,23 @@
 from __future__ import annotations
 
+"""
+Code Critic Agent
+
+Responsibilities:
+- Analyze code/output for errors and improvements
+- Verify solution matches original requirements
+- Perform security/reliability checks
+- Generate actionable feedback for coder
+
+Workflow:
+1. Receives coder's output + original task
+2. Performs multi-aspect analysis:
+   - Correctness (does it solve the problem?)
+   - Safety (potential risks)
+   - Efficiency (better approaches)
+3. Returns improvement instructions
+"""
+
 import re
 
 from ..state import LlamiaState, ExecResult
@@ -97,6 +115,20 @@ def _build_web_query(goal_text: str, last: ExecResult) -> str:
 
 
 def critic_node(state: LlamiaState) -> LlamiaState:
+    """
+    Main critique entry point
+    
+    Args:
+        state: Must contain:
+          - command: Code/command being evaluated
+          - command_output: Execution results
+          - user_request: Original task
+        
+    Returns:
+        Updated state with:
+          - fix_instructions: Specific improvement steps
+          - approved: Boolean if solution meets criteria
+    """
     state.log(f"[{NODE_NAME}] starting")
 
     max_loops = DEFAULT_CONFIG.max_loops

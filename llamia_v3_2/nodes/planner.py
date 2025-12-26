@@ -6,7 +6,21 @@ from typing import Any
 
 from ..config import DEFAULT_CONFIG
 from ..llm_client import chat_completion
-from ..state import LlamiaState, PlanStep
+from ..state import LlamiaState, PlanStep"""
+Planning Agent (planner)
+
+Core Responsibilities:
+- Decomposes user requests into executable steps
+- Generates structured JSON plans
+- Defines planning principles and constraints
+- Interfaces with LLM for plan generation
+
+Key Components:
+- PLANNER_SYSTEM_PROMPT: Core planning instructions
+- OUTPUT VALIDATION: Ensures plan structure integrity
+"""
+
+
 
 NODE_NAME = "planner"
 
@@ -192,6 +206,18 @@ def _enhance_plan_with_context(plan_steps: list[dict]) -> list[PlanStep]:
 
 
 def planner_node(state: LlamiaState) -> LlamiaState:
+    """
+    Planner node entry point - transforms state with generated plan
+    
+    Args:
+        state: Current agent state (requires user_request)
+        llm_client: Configured LLM client
+    
+    Returns:
+        Updated state containing:
+        - plan: Generated execution steps
+        - requires_web_search: Boolean research flag
+    """
     state.log(f"[{NODE_NAME}] starting")
 
     if state.mode != "task" or not state.goal:

@@ -9,6 +9,25 @@ class Message(TypedDict):
     content: str
     node: str | None  # which node produced this (for trace/debug)
 
+"""
+State Management System
+
+Core Components:
+- LlamiaState: Central dataclass holding all agent state
+- State fields organized by category:
+  * Intent tracking (current task/command)
+  * Research context (web/search results)
+  * Execution status (current command/output)
+  * Routing control (next agent/return points)
+  * Conversation history
+
+Important Notes:
+- State is persisted across turns
+- New fields must be initialized in _reset_turn_fields
+- Backward compatibility maintained via _ensure_turn_fields_exist
+"""
+
+
 
 @dataclass
 class PlanStep:
@@ -40,6 +59,23 @@ class ExecResult:
 
 @dataclass
 class LlamiaState:
+    """
+    Central state container for Llamia agent workflow
+    
+    Attributes:
+        turn_id: Current conversation turn counter
+        mode: Current operational mode (e.g., 'task', 'command')
+        user_request: Original user request text
+        plan: Current step-by-step execution plan
+        research_notes: Compiled research context
+        web_results: Raw web search results
+        command: Current CLI command being executed
+        command_output: Last command execution result
+        fix_instructions: Error corrections from critic
+        next_agent: Routing target after current operation
+        return_after_web: Where to return after web research
+        return_after_research: Where to return after research
+    """
     """
     Core shared state for Llamia v3.2.
 
