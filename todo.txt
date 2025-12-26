@@ -1,0 +1,198 @@
+Llamia v3.2 Punch List
+A) High-priority bugs (fix now)
+
+ Fix planner prompt tuple bug in _analyze_goal_complexity (string tuple ? single string)
+
+ Run test suite and confirm it still passes after the fix
+
+ Run a real end-to-end task (simple “create a file + run tests”) to confirm planner ? coder ? exec ? critic ? chat works
+
+B) Repo cleanup (reduce confusion + technical debt)
+
+ Delete / move .bak, .orig, .rej, Patch.txt artifacts out of main repo
+
+ Confirm no imports reference any backup files (sanity grep)
+
+ Remove any stale comments that imply behavior no longer true (“FIXED: include research”, etc.)
+
+C) “Improved” module consolidation (stop maintaining duplicates)
+
+ Decide the “source of truth” (goal: improved becomes default)
+
+ Merge state_improved.py ? state.py
+
+ Merge graph_improved.py ? graph.py
+
+ Update imports everywhere so only one graph/state exists
+
+ Delete the unused duplicate files after merge
+
+ Run full tests again
+
+ Run 2–3 real tasks to confirm no routing regressions
+
+D) State correctness and isolation between turns
+
+ Confirm whether REPL uses persistent state across turns
+
+ If state persists: in intent_router, hard reset task-specific fields on new task:
+
+ clear plan
+
+ clear pending patches / applied patches
+
+ clear exec_results (or keep history but clear last_exec_results)
+
+ clear research_notes, web_results, web_queue
+
+ Add a test: “new task does not inherit prior plan / patches”
+
+E) Loop safety + reliability (avoid runaway agent loops)
+
+ Add a max loop count guard (ex: 3–6 attempts)
+
+ When exceeded:
+
+ route to chat
+
+ produce “blocked” summary + what it tried + ask user for clarification/logs
+
+ Add a test: loop_count cap triggers safe exit
+
+F) Expected failure logic (feature currently dormant)
+
+ Wire _detect_expected_failure() into the flow:
+
+ set state.expected_failure when starting a task (router or planner)
+
+ Add test cases:
+
+ “it should fail” ? critic does not auto-fix immediately
+
+ “then fix it” ? critic does proceed to fix loop
+
+G) Routing + graph consistency hardening
+
+ Ensure every return_after value is allowed by graph edges
+
+ Add explicit allowed values / enums for:
+
+ state.next_agent
+
+ state.return_after_web
+
+ state.return_after_research
+
+ Make routing functions safe on missing state keys (use improved behavior everywhere)
+
+ Add tests for “unknown return_after_web defaults safely”
+
+H) Logging strategy (make debugging painless)
+
+ Decide standard:
+
+ Python logging = developer logs
+
+ state.trace = agent reasoning trace
+
+ Ensure every node logs:
+
+ entry + exit
+
+ key decisions (routing, retries, truncations)
+
+ Add log-level controls (env var or config): DEBUG/INFO/WARN
+
+ Ensure exec outputs are truncated consistently (single constant)
+
+I) RAG + research validation (align with your stated goal)
+
+ Add a “RAG used” proof:
+
+ trace line when retrieval is called
+
+ count of chunks retrieved
+
+ file paths referenced
+
+ Add a small test repo fixture and test:
+
+ retrieval returns expected chunk for known content
+
+ Ensure planner/coder prompts actually include the retrieved notes in a reliable way
+
+J) Web research validation (real-world reliability)
+
+ Confirm SearxNG config works consistently
+
+ Add retry/backoff for transient HTTP failures
+
+ Ensure web results are:
+
+ summarized
+
+ token-limited
+
+ consistently injected into context (system msg or research_notes)
+
+ Add test: web_results appended and routed back correctly
+
+K) Integration tests (big win for stability)
+
+ Add deterministic integration tests by mocking the LLM:
+
+ planner returns fixed plan JSON
+
+ coder returns fixed patch JSON + command
+
+ executor returns success
+
+ critic returns “done”
+
+ Add integration test for failure loop:
+
+ executor returns failing test
+
+ critic sets fix_instructions
+
+ coder returns corrected patch
+
+ executor passes
+
+L) Quality and maintenance upgrades (nice-to-haves, but worth it)
+
+ Add pre-commit (ruff, mypy, pytest)
+
+ Add CI workflow (GitHub Actions) to run:
+
+ ruff
+
+ mypy
+
+ pytest
+
+ Add “dev command” makefile or scripts:
+
+ make test
+
+ make lint
+
+ make typecheck
+
+Milestones view (so you feel progress)
+
+ M1: Core stability (A + E)
+
+ M2: Repo clarity (B + C)
+
+ M3: Correctness across turns (D + G)
+
+ M4: RAG + Web research proven in trace/tests (I + J)
+
+ M5: Integration tests + CI (K + L)
+
+## Completed
+[x] Create a README.md with architecture overview
+[x] Add requirements.txt with core dependencies
+[x] Move all agent scripts into modules/ directory (Note: Agent logic is embedded in package structure)
+[x] Fixed: Bug where after completing a task (with "task:" prefix), the next task prompt would cause the router to loop. Reset state.mode to None at the beginning of each turn in _reset_turn_fields.

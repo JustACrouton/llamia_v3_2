@@ -1,0 +1,5 @@
+# Core dependencies for Llamia project
+requests>=2.31.0
+-dotenv>=1.0.0
+openinterpreter>=0.1.0
+chardet>=5.2.0

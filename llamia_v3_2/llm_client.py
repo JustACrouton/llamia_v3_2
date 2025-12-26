@@ -96,25 +96,6 @@ def get_client(model_cfg: ModelConfig) -> OpenAI:
 
 
 def chat_completion(
-    """
-    Generate LLM response with enforced structure
-    
-    Args:
-        messages: Conversation history in OpenAI format
-        model: Which LLM to use (e.g., 'gpt-4-turbo')
-        json_mode: Whether to force JSON output
-        temperature: Creativity vs precision control
-        
-    Returns:
-        Dict: {
-            "content": Full text response,
-            "usage": Token counts,
-            "finish_reason": Why generation stopped
-        }
-        
-    Raises:
-        LLMException: For critical generation failures
-    """
     messages: Iterable[Message],
     model_cfg: ModelConfig | None = None,
 ) -> str:
